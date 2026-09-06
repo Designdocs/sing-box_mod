@@ -31,10 +31,12 @@ import (
 // the test can assert that plain clients are attributed like naive ones.
 type directRouter struct {
 	users chan string
+	dests chan string
 }
 
 func (r *directRouter) RouteConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
 	r.users <- metadata.User
+	r.dests <- metadata.Destination.String()
 	upstream, err := net.Dial("tcp", metadata.Destination.String())
 	if err != nil {
 		return err
@@ -67,7 +69,7 @@ var testUsers = []auth.User{{Username: "user", Password: "secret"}}
 
 func newTestInbound(t *testing.T) (*Inbound, *directRouter) {
 	t.Helper()
-	router := &directRouter{users: make(chan string, 8)}
+	router := &directRouter{users: make(chan string, 8), dests: make(chan string, 8)}
 	logger := log.NewNOPFactory().NewLogger("test")
 	return &Inbound{
 		Adapter:       inbound.NewAdapter(C.TypeNaive, "test"),
@@ -261,6 +263,49 @@ func TestNaiveClientAbsoluteURIRequestIsStillRejected(t *testing.T) {
 	fmt.Fprintf(conn, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nPadding: ~~~~\r\nProxy-Authorization: %s\r\n\r\n", basicAuth("user", "secret"))
 	if _, err := http.ReadResponse(reader, nil); err == nil {
 		t.Fatal("naive client sending a non-CONNECT request received a response; expected a drop")
+	}
+}
+
+// The probe host is a plain-client mechanism only. A naive client that happens
+// to address one still gets the padded tunnel it asked for: nothing on the
+// naive path consults the probe index, so third-party naive clients are
+// unaffected by probe resistance.
+func TestNaiveClientReachingAProbeHostStillGetsTheTunnel(t *testing.T) {
+	in, router := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	probeHost := probeHostFor("user", "secret")
+	conn, reader := dialProxy(t, proxy)
+	fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\nPadding: ~~~~\r\nProxy-Authorization: %s\r\n\r\n",
+		probeHost, probeHost, basicAuth("user", "secret"))
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a naive client must not get the plain 204)", response.StatusCode)
+	}
+	if response.Header.Get("Padding") == "" {
+		t.Fatal("naive client did not receive a Padding header")
+	}
+	if user := <-router.users; user != "user" {
+		t.Fatalf("routed user = %q, want user", user)
+	}
+	if dest := <-router.dests; dest != probeHost+":443" {
+		t.Fatalf("routed destination = %q, want the probe host (it must not be intercepted)", dest)
+	}
+}
+
+// A naive client with no credentials is still dropped in silence, not given
+// the plain client's 404: probe resistance did not change the naive path.
+func TestNaiveClientWithoutCredentialsIsStillDroppedSilently(t *testing.T) {
+	in, _ := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	conn, reader := dialProxy(t, proxy)
+	fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nPadding: ~~~~\r\n\r\n")
+	if _, err := http.ReadResponse(reader, nil); err == nil {
+		t.Fatal("naive client without credentials received a response; expected the connection to be dropped")
 	}
 }
 
