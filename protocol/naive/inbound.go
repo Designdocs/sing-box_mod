@@ -143,13 +143,16 @@ func (n *Inbound) Close() error {
 
 func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx := log.ContextWithNewID(request.Context())
-	if request.Method != "CONNECT" {
+	// A request without the naive Padding header comes from a plain HTTPS
+	// proxy client (a browser, curl -x https://...), not from a naive client.
+	// Such clients get a standard forward proxy on the same port and with the
+	// same users: CONNECT tunnels carry no padding frames and absolute-URI
+	// requests are forwarded as plain HTTP. Naive clients are served exactly
+	// as before, including the silent connection drop on bad requests.
+	plainClient := request.Header.Get("Padding") == ""
+	if request.Method != "CONNECT" && !plainClient {
 		rejectHTTP(writer, http.StatusBadRequest)
 		n.badRequest(ctx, request, E.New("not CONNECT request"))
-		return
-	} else if request.Header.Get("Padding") == "" {
-		rejectHTTP(writer, http.StatusBadRequest)
-		n.badRequest(ctx, request, E.New("missing naive padding"))
 		return
 	}
 	userName, password, authOk := sHttp.ParseBasicAuth(request.Header.Get("Proxy-Authorization"))
@@ -157,11 +160,25 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		authOk = n.authenticator.Verify(userName, password)
 	}
 	if !authOk {
-		rejectHTTP(writer, http.StatusProxyAuthRequired)
+		if plainClient {
+			// Browsers only send credentials after a 407 that names the scheme.
+			writer.Header().Set("Proxy-Authenticate", proxyAuthenticateChallenge)
+			writer.Header().Set("Content-Length", "0")
+			writer.WriteHeader(http.StatusProxyAuthRequired)
+		} else {
+			rejectHTTP(writer, http.StatusProxyAuthRequired)
+		}
 		n.badRequest(ctx, request, E.New("authorization failed"))
 		return
 	}
-	writer.Header().Set("Padding", generateNaivePaddingHeader())
+	source := sHttp.SourceAddress(request)
+	if request.Method != "CONNECT" {
+		n.forwardPlainHTTP(ctx, writer, request, userName, source)
+		return
+	}
+	if !plainClient {
+		writer.Header().Set("Padding", generateNaivePaddingHeader())
+	}
 	writer.WriteHeader(http.StatusOK)
 	writer.(http.Flusher).Flush()
 
@@ -169,7 +186,6 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if hostPort == "" {
 		hostPort = request.Host
 	}
-	source := sHttp.SourceAddress(request)
 	destination := M.ParseSocksaddr(hostPort).Unwrap()
 
 	if hijacker, isHijacker := writer.(http.Hijacker); isHijacker {
@@ -178,13 +194,30 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			n.badRequest(ctx, request, E.New("hijack failed"))
 			return
 		}
-		n.newConnection(ctx, false, &naiveH1Conn{Conn: conn}, userName, source, destination)
+		// net/http cancels the request context as soon as this handler
+		// returns, hijacked or not, and the router copies under that context.
+		// The tunnel outlives the handler, so it must not inherit the cancel.
+		n.newConnection(context.WithoutCancel(ctx), false, newNaiveH1Conn(conn, !plainClient), userName, source, destination)
 	} else {
-		n.newConnection(ctx, true, &naiveH2Conn{reader: request.Body, writer: writer, flusher: writer.(http.Flusher)}, userName, source, destination)
+		n.newConnection(ctx, true, newNaiveH2Conn(request.Body, writer, !plainClient), userName, source, destination)
 	}
 }
 
 func (n *Inbound) newConnection(ctx context.Context, waitForClose bool, conn net.Conn, userName string, source M.Socksaddr, destination M.Socksaddr) {
+	if !waitForClose {
+		n.routeConnection(ctx, conn, userName, source, destination, nil)
+		return
+	}
+	done := make(chan struct{})
+	wrapper := v2rayhttp.NewHTTP2Wrapper(conn)
+	n.routeConnection(ctx, conn, userName, source, destination, N.OnceClose(func(it error) {
+		close(done)
+	}))
+	<-done
+	wrapper.CloseWrapper()
+}
+
+func (n *Inbound) routeConnection(ctx context.Context, conn net.Conn, userName string, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if userName != "" {
 		n.logger.InfoContext(ctx, "[", userName, "] inbound connection from ", source)
 		n.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", destination)
@@ -203,17 +236,7 @@ func (n *Inbound) newConnection(ctx context.Context, waitForClose bool, conn net
 	metadata.Destination = destination
 	metadata.OriginDestination = M.SocksaddrFromNet(conn.LocalAddr()).Unwrap()
 	metadata.User = userName
-	if !waitForClose {
-		n.router.RouteConnectionEx(ctx, conn, metadata, nil)
-	} else {
-		done := make(chan struct{})
-		wrapper := v2rayhttp.NewHTTP2Wrapper(conn)
-		n.router.RouteConnectionEx(ctx, conn, metadata, N.OnceClose(func(it error) {
-			close(done)
-		}))
-		<-done
-		wrapper.CloseWrapper()
-	}
+	n.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
 func (n *Inbound) badRequest(ctx context.Context, request *http.Request, err error) {

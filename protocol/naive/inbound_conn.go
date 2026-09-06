@@ -26,6 +26,19 @@ type naiveH1Conn struct {
 	paddingRemaining int
 }
 
+// newNaiveH1Conn wraps a hijacked HTTP/1 tunnel. With padded=false the
+// wrapper is transparent: the padding counters start exhausted, so no frame
+// header is expected on read or added on write and the reader/writer are
+// immediately replaceable.
+func newNaiveH1Conn(conn net.Conn, padded bool) *naiveH1Conn {
+	c := &naiveH1Conn{Conn: conn}
+	if !padded {
+		c.readPadding = kFirstPaddings
+		c.writePadding = kFirstPaddings
+	}
+	return c
+}
+
 func (c *naiveH1Conn) Read(p []byte) (n int, err error) {
 	n, err = c.read(p)
 	return n, wrapHttpError(err)
@@ -199,6 +212,17 @@ type naiveH2Conn struct {
 	writePadding     int
 	readRemaining    int
 	paddingRemaining int
+}
+
+// newNaiveH2Conn wraps an HTTP/2 CONNECT stream; see newNaiveH1Conn for the
+// meaning of padded.
+func newNaiveH2Conn(reader io.Reader, writer http.ResponseWriter, padded bool) *naiveH2Conn {
+	c := &naiveH2Conn{reader: reader, writer: writer, flusher: writer.(http.Flusher)}
+	if !padded {
+		c.readPadding = kFirstPaddings
+		c.writePadding = kFirstPaddings
+	}
+	return c
 }
 
 func (c *naiveH2Conn) Read(p []byte) (n int, err error) {
