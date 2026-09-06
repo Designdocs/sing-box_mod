@@ -426,8 +426,14 @@ func (c *naiveH2Conn) ReaderReplaceable() bool {
 	return c.readPadding == kFirstPaddings
 }
 
+// WriterReplaceable is never true: every write has to be followed by a flush,
+// or the HTTP/2 server holds it in its 4 KiB response buffer until enough
+// bytes pile up or the stream ends. A copy that unwrapped this writer would
+// write straight to the ResponseWriter and skip the flush, stalling anything
+// that sends less than a bufferful and then waits for an answer -- a TLS
+// handshake through the tunnel, for one.
 func (c *naiveH2Conn) WriterReplaceable() bool {
-	return c.writePadding == kFirstPaddings
+	return false
 }
 
 func wrapHttpError(err error) error {

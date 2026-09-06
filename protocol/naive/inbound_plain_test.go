@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -491,5 +492,123 @@ func TestPlainConnectOverHTTP2WithoutCredentialsIsNotFound(t *testing.T) {
 	}
 	if _, err = io.ReadAll(response.Body); err != nil {
 		t.Fatalf("reading the rejected stream to EOF: %v", err)
+	}
+}
+
+// A tunnel must hand the client every byte the destination has already sent,
+// without waiting for more traffic or for the connection to end. A browser
+// stalls on the last partial record of a TLS handshake otherwise.
+func TestPlainConnectOverHTTP2DeliversPartialWritesPromptly(t *testing.T) {
+	const blobSize = 5346
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		conn.Write(make([]byte, blobSize))
+		io.Copy(io.Discard, conn) // hold the connection open
+	}()
+
+	in, _ := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	upload, uploadWriter := io.Pipe()
+	defer uploadWriter.Close()
+	request, err := http.NewRequest(http.MethodConnect, "https://"+proxy.Listener.Addr().String(), upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = listener.Addr().String()
+	request.Header.Set("Proxy-Authorization", basicAuth("user", "secret"))
+	response, err := newH2Transport(t).RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	read := make(chan int, 1)
+	go func() {
+		n, _ := io.ReadFull(response.Body, make([]byte, blobSize))
+		read <- n
+	}()
+	select {
+	case n := <-read:
+		if n != blobSize {
+			t.Fatalf("read %d bytes of the destination's first write, want %d", n, blobSize)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the destination's first write never arrived in full")
+	}
+}
+
+// A browser speaks first: it writes a TLS ClientHello and then waits. The
+// destination's reply must reach it as soon as the destination sends it.
+func TestPlainConnectOverHTTP2AnswersAClientThatSpeaksFirst(t *testing.T) {
+	const helloSize = 1815
+	const replySize = 3003
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	received := make(chan int, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		n, _ := io.ReadFull(conn, make([]byte, helloSize))
+		received <- n
+		conn.Write(make([]byte, replySize))
+		io.Copy(io.Discard, conn) // hold the connection open
+	}()
+
+	in, _ := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	upload, uploadWriter := io.Pipe()
+	defer uploadWriter.Close()
+	request, err := http.NewRequest(http.MethodConnect, "https://"+proxy.Listener.Addr().String(), upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = listener.Addr().String()
+	request.Header.Set("Proxy-Authorization", basicAuth("user", "secret"))
+	response, err := newH2Transport(t).RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	go uploadWriter.Write(make([]byte, helloSize))
+	select {
+	case n := <-received:
+		if n != helloSize {
+			t.Fatalf("the destination read %d bytes of the client's first write, want %d", n, helloSize)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client's first write never reached the destination")
+	}
+	read := make(chan int, 1)
+	go func() {
+		n, _ := io.ReadFull(response.Body, make([]byte, replySize))
+		read <- n
+	}()
+	select {
+	case n := <-read:
+		if n != replySize {
+			t.Fatalf("read %d bytes of the destination's reply, want %d", n, replySize)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the destination's reply never reached the client")
 	}
 }
