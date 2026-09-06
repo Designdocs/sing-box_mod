@@ -464,3 +464,32 @@ func TestPlainOriginFormRequestIsNotFoundWithoutChallenge(t *testing.T) {
 		t.Fatalf("Proxy-Authenticate = %q, want no challenge on a non-proxy request", got)
 	}
 }
+
+// A plain h2 CONNECT with no credentials must be answered 404 and the stream
+// closed, exactly as over h1: no challenge, and no half-open tunnel for a
+// prober to hold on to.
+func TestPlainConnectOverHTTP2WithoutCredentialsIsNotFound(t *testing.T) {
+	in, _ := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	upload, uploadWriter := io.Pipe()
+	defer uploadWriter.Close()
+	request, err := http.NewRequest(http.MethodConnect, "https://"+proxy.Listener.Addr().String(), upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "example.com:443"
+	response, err := newH2Transport(t).RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.StatusCode)
+	}
+	if challenge := response.Header.Get("Proxy-Authenticate"); challenge != "" {
+		t.Fatalf("unauthenticated h2 CONNECT was challenged with %q", challenge)
+	}
+	if _, err = io.ReadAll(response.Body); err != nil {
+		t.Fatalf("reading the rejected stream to EOF: %v", err)
+	}
+}
