@@ -155,6 +155,14 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		n.badRequest(ctx, request, E.New("not CONNECT request"))
 		return
 	}
+	if plainClient && request.Method != "CONNECT" && !isProxyRequest(request) {
+		// An origin-form request (GET / and the like) is addressed to this
+		// host, not through it: a browser reachability probe or a scanner.
+		// It is answered like any web server would, with no challenge, so a
+		// bare visit neither fails with an unexpected 407 nor reveals a proxy.
+		http.NotFound(writer, request)
+		return
+	}
 	userName, password, authOk := sHttp.ParseBasicAuth(request.Header.Get("Proxy-Authorization"))
 	if authOk {
 		authOk = n.authenticator.Verify(userName, password)

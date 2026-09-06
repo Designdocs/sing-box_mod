@@ -18,16 +18,18 @@ import (
 // dropped, as before), so nothing here identifies the server as naive.
 const proxyAuthenticateChallenge = `Basic realm="proxy" charset="UTF-8"`
 
+// isProxyRequest reports whether a non-CONNECT request names its target in
+// absolute-URI form, the way a browser addresses an http:// origin through a
+// proxy. Anything else is addressed to this server itself.
+func isProxyRequest(request *http.Request) bool {
+	return request.URL.Scheme != "" && request.URL.Host != ""
+}
+
 // forwardPlainHTTP serves a non-CONNECT request from a plain proxy client:
 // the absolute-URI form a browser sends for http:// origins. The upstream
 // connection is routed through the inbound's router like a tunnel would be,
 // so routing rules, user attribution and traffic accounting all apply.
 func (n *Inbound) forwardPlainHTTP(ctx context.Context, writer http.ResponseWriter, request *http.Request, userName string, source M.Socksaddr) {
-	if request.URL.Scheme == "" || request.URL.Host == "" {
-		http.Error(writer, "proxy request must use an absolute URI", http.StatusBadRequest)
-		n.badRequest(ctx, request, E.New("plain request without absolute URI"))
-		return
-	}
 	outbound := request.Clone(ctx)
 	outbound.RequestURI = ""
 	removeHopByHopHeaders(outbound.Header)

@@ -239,3 +239,22 @@ func TestPlainConnectOverHTTP2TunnelsWithoutPadding(t *testing.T) {
 		t.Fatalf("tunnelled body = %q", body)
 	}
 }
+
+func TestPlainOriginFormRequestIsNotFoundWithoutChallenge(t *testing.T) {
+	in, _ := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	conn, reader := dialProxy(t, proxy)
+	// A browser probing the node host, or a scanner, addresses the server itself.
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", proxy.Listener.Addr())
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.StatusCode)
+	}
+	if got := response.Header.Get("Proxy-Authenticate"); got != "" {
+		t.Fatalf("Proxy-Authenticate = %q, want no challenge on a non-proxy request", got)
+	}
+}
