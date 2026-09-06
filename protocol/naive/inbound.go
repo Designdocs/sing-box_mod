@@ -40,6 +40,7 @@ type Inbound struct {
 	network          []string
 	networkIsDefault bool
 	authenticator    *auth.Authenticator
+	probeHosts       map[string]string
 	tlsConfig        tls.ServerConfig
 	httpServer       *http.Server
 	h3Server         io.Closer
@@ -59,6 +60,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		networkIsDefault: options.Network == "",
 		network:          options.Network.Build(),
 		authenticator:    auth.NewAuthenticator(options.Users),
+		probeHosts:       probeHostIndex(options.Users),
 	}
 	if common.Contains(inbound.network, N.NetworkUDP) {
 		if options.TLS == nil || !options.TLS.Enabled {
@@ -168,18 +170,22 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		authOk = n.authenticator.Verify(userName, password)
 	}
 	if !authOk {
-		if plainClient {
-			// Browsers only send credentials after a 407 that names the scheme.
-			writer.Header().Set("Proxy-Authenticate", proxyAuthenticateChallenge)
-			writer.Header().Set("Content-Length", "0")
-			writer.WriteHeader(http.StatusProxyAuthRequired)
-		} else {
+		if !plainClient {
 			rejectHTTP(writer, http.StatusProxyAuthRequired)
+			n.badRequest(ctx, request, E.New("authorization failed"))
+			return
 		}
-		n.badRequest(ctx, request, E.New("authorization failed"))
+		n.rejectPlainClient(ctx, writer, request)
 		return
 	}
 	source := sHttp.SourceAddress(request)
+	if plainClient && n.isProbeHost(request) {
+		// The credential-priming request: the browser now holds working
+		// credentials for this proxy and there is nothing to reach.
+		writer.Header().Set("Content-Length", "0")
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if request.Method != "CONNECT" {
 		n.forwardPlainHTTP(ctx, writer, request, userName, source)
 		return
@@ -245,6 +251,28 @@ func (n *Inbound) routeConnection(ctx context.Context, conn net.Conn, userName s
 	metadata.OriginDestination = M.SocksaddrFromNet(conn.LocalAddr()).Unwrap()
 	metadata.User = userName
 	n.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+}
+
+func (n *Inbound) isProbeHost(request *http.Request) bool {
+	_, found := n.probeHosts[requestTargetHostname(request)]
+	return found
+}
+
+// rejectPlainClient answers a plain client that presented no valid
+// credentials. Only a request for the client's own probe host earns the 407
+// that names the authentication scheme; anything else, CONNECT included, is
+// a 404 with no challenge, so a prober holding no credentials sees a web
+// server that has nothing at that address, never a proxy.
+func (n *Inbound) rejectPlainClient(ctx context.Context, writer http.ResponseWriter, request *http.Request) {
+	if !n.isProbeHost(request) {
+		http.NotFound(writer, request)
+		n.logger.DebugContext(ctx, "unauthenticated plain request from ", request.RemoteAddr, " answered 404")
+		return
+	}
+	// Browsers only send credentials after a 407 that names the scheme.
+	writer.Header().Set("Proxy-Authenticate", proxyAuthenticateChallenge)
+	writer.Header().Set("Content-Length", "0")
+	writer.WriteHeader(http.StatusProxyAuthRequired)
 }
 
 func (n *Inbound) badRequest(ctx context.Context, request *http.Request, err error) {

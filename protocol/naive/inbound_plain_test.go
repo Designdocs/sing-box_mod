@@ -63,6 +63,8 @@ func (r *directRouter) RoutePacketConnectionEx(_ context.Context, conn N.PacketC
 	}
 }
 
+var testUsers = []auth.User{{Username: "user", Password: "secret"}}
+
 func newTestInbound(t *testing.T) (*Inbound, *directRouter) {
 	t.Helper()
 	router := &directRouter{users: make(chan string, 8)}
@@ -73,7 +75,8 @@ func newTestInbound(t *testing.T) (*Inbound, *directRouter) {
 		router:        router,
 		logger:        logger,
 		listener:      listener.New(listener.Options{Context: context.Background(), Logger: logger, Listen: option.ListenOptions{}}),
-		authenticator: auth.NewAuthenticator([]auth.User{{Username: "user", Password: "secret"}}),
+		authenticator: auth.NewAuthenticator(testUsers),
+		probeHosts:    probeHostIndex(testUsers),
 	}, router
 }
 
@@ -102,7 +105,7 @@ func dialProxy(t *testing.T, proxy *httptest.Server) (net.Conn, *std_bufio.Reade
 	return conn, std_bufio.NewReader(conn)
 }
 
-func TestPlainConnectWithoutCredentialsIsChallenged(t *testing.T) {
+func TestPlainConnectWithoutCredentialsIsNotFoundWithoutChallenge(t *testing.T) {
 	in, _ := newTestInbound(t)
 	proxy := httptest.NewServer(in)
 	defer proxy.Close()
@@ -112,11 +115,76 @@ func TestPlainConnectWithoutCredentialsIsChallenged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.StatusCode)
+	}
+	if got := response.Header.Get("Proxy-Authenticate"); got != "" {
+		t.Fatalf("Proxy-Authenticate = %q, want no challenge for a prober without credentials", got)
+	}
+}
+
+// The derivation is shared with the browser extension: a change here is a
+// protocol change, so the vector is pinned.
+func TestProbeHostDerivationIsPinned(t *testing.T) {
+	if got := probeHostFor("user", "secret"); got != "92592125f3859823.invalid" {
+		t.Fatalf("probeHostFor = %q", got)
+	}
+	if probeHostFor("user", "other") == probeHostFor("user", "secret") {
+		t.Fatal("probe host does not depend on the password")
+	}
+}
+
+func TestPlainProbeHostWithoutCredentialsIsChallenged(t *testing.T) {
+	in, _ := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	probeHost := probeHostFor("user", "secret")
+	conn, reader := dialProxy(t, proxy)
+	fmt.Fprintf(conn, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\n\r\n", probeHost, probeHost)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if response.StatusCode != http.StatusProxyAuthRequired {
 		t.Fatalf("status = %d, want 407", response.StatusCode)
 	}
 	if got := response.Header.Get("Proxy-Authenticate"); !strings.HasPrefix(got, "Basic ") {
 		t.Fatalf("Proxy-Authenticate = %q, want a Basic challenge", got)
+	}
+}
+
+func TestPlainProbeHostWithCredentialsIsNoContent(t *testing.T) {
+	in, router := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	probeHost := probeHostFor("user", "secret")
+	conn, reader := dialProxy(t, proxy)
+	fmt.Fprintf(conn, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n", probeHost, probeHost, basicAuth("user", "secret"))
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.StatusCode)
+	}
+	if len(router.users) != 0 {
+		t.Fatal("the probe request was routed upstream")
+	}
+}
+
+func TestPlainProbeHostWithWrongPasswordIsChallengedNotForwarded(t *testing.T) {
+	in, router := newTestInbound(t)
+	proxy := httptest.NewServer(in)
+	defer proxy.Close()
+	probeHost := probeHostFor("user", "secret")
+	conn, reader := dialProxy(t, proxy)
+	fmt.Fprintf(conn, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: %s\r\n\r\n", probeHost, probeHost, basicAuth("user", "wrong"))
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusProxyAuthRequired || len(router.users) != 0 {
+		t.Fatalf("status = %d routed = %d, want 407 and nothing routed", response.StatusCode, len(router.users))
 	}
 }
 
@@ -237,6 +305,99 @@ func TestPlainConnectOverHTTP2TunnelsWithoutPadding(t *testing.T) {
 	body, _ := io.ReadAll(inner.Body)
 	if string(body) != `path=/h2 auth=""` {
 		t.Fatalf("tunnelled body = %q", body)
+	}
+}
+
+func newH2Transport(t *testing.T) *http2.Transport {
+	t.Helper()
+	transport := &http2.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	t.Cleanup(transport.CloseIdleConnections)
+	return transport
+}
+
+func startH2Proxy(t *testing.T, in *Inbound) *httptest.Server {
+	t.Helper()
+	proxy := httptest.NewUnstartedServer(in)
+	proxy.EnableHTTP2 = true
+	proxy.StartTLS()
+	t.Cleanup(proxy.Close)
+	return proxy
+}
+
+// Over h2 an http:// origin is addressed through :authority alone; the
+// request must still be recognised as a proxy request and forwarded.
+func TestPlainAbsoluteURIOverHTTP2IsForwarded(t *testing.T) {
+	in, router := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	target := startTarget(t)
+	request, err := http.NewRequest(http.MethodGet, "https://"+proxy.Listener.Addr().String()+"/h2plain", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = target.Listener.Addr().String()
+	request.Header.Set("Proxy-Authorization", basicAuth("user", "secret"))
+	response, err := newH2Transport(t).RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.ProtoMajor != 2 || response.StatusCode != http.StatusOK || string(body) != `path=/h2plain auth=""` {
+		t.Fatalf("proto = %s status = %d body = %q", response.Proto, response.StatusCode, body)
+	}
+	if user := <-router.users; user != "user" {
+		t.Fatalf("routed user = %q, want user", user)
+	}
+}
+
+func TestPlainProbeHostOverHTTP2(t *testing.T) {
+	in, router := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	transport := newH2Transport(t)
+	probeHost := probeHostFor("user", "secret")
+	roundTrip := func(authorization string) *http.Response {
+		request, err := http.NewRequest(http.MethodGet, "https://"+proxy.Listener.Addr().String()+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = probeHost
+		if authorization != "" {
+			request.Header.Set("Proxy-Authorization", authorization)
+		}
+		response, err := transport.RoundTrip(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response
+	}
+	if response := roundTrip(""); response.StatusCode != http.StatusProxyAuthRequired || !strings.HasPrefix(response.Header.Get("Proxy-Authenticate"), "Basic ") {
+		t.Fatalf("unauthenticated: status = %d challenge = %q", response.StatusCode, response.Header.Get("Proxy-Authenticate"))
+	}
+	if response := roundTrip(basicAuth("user", "secret")); response.StatusCode != http.StatusNoContent {
+		t.Fatalf("authenticated: status = %d, want 204", response.StatusCode)
+	}
+	if len(router.users) != 0 {
+		t.Fatal("a probe request was routed upstream")
+	}
+}
+
+// A direct visit over h2 (no proxy semantics: :authority is this server) is
+// a 404 like on HTTP/1.1, whether or not the visitor is a scanner.
+func TestPlainOriginFormOverHTTP2IsNotFound(t *testing.T) {
+	in, _ := newTestInbound(t)
+	proxy := startH2Proxy(t, in)
+	request, err := http.NewRequest(http.MethodGet, "https://"+proxy.Listener.Addr().String()+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := newH2Transport(t).RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound || response.Header.Get("Proxy-Authenticate") != "" {
+		t.Fatalf("status = %d challenge = %q, want a bare 404", response.StatusCode, response.Header.Get("Proxy-Authenticate"))
 	}
 }
 
