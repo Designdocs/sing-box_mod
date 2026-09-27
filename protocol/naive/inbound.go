@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -39,6 +40,8 @@ type Inbound struct {
 	listener         *listener.Listener
 	network          []string
 	networkIsDefault bool
+	usersMu          sync.RWMutex
+	activeUsers      map[string]int
 	authenticator    *auth.Authenticator
 	probeHosts       map[string]string
 	tlsConfig        tls.ServerConfig
@@ -135,12 +138,16 @@ func (n *Inbound) Start(stage adapter.StartStage) error {
 }
 
 func (n *Inbound) Close() error {
-	return common.Close(
-		&n.listener,
+	serverErr := common.Close(
 		common.PtrOrNil(n.httpServer),
 		n.h3Server,
 		n.tlsConfig,
 	)
+	listenerErr := n.listener.Close()
+	if E.IsClosedOrCanceled(listenerErr) {
+		listenerErr = nil
+	}
+	return E.Errors(serverErr, listenerErr)
 }
 
 func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -166,8 +173,9 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	userName, password, authOk := sHttp.ParseBasicAuth(request.Header.Get("Proxy-Authorization"))
+	var releaseUser func()
 	if authOk {
-		authOk = n.authenticator.Verify(userName, password)
+		releaseUser, authOk = n.authenticate(userName, password)
 	}
 	if !authOk {
 		if !plainClient {
@@ -178,6 +186,11 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		n.rejectPlainClient(ctx, writer, request)
 		return
 	}
+	defer func() {
+		if releaseUser != nil {
+			releaseUser()
+		}
+	}()
 	source := sHttp.SourceAddress(request)
 	if plainClient && n.isProbeHost(request) {
 		// The credential-priming request: the browser now holds working
@@ -211,17 +224,15 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		// net/http cancels the request context as soon as this handler
 		// returns, hijacked or not, and the router copies under that context.
 		// The tunnel outlives the handler, so it must not inherit the cancel.
-		n.newConnection(context.WithoutCancel(ctx), false, newNaiveH1Conn(conn, !plainClient), userName, source, destination)
+		release := releaseUser
+		n.routeConnection(context.WithoutCancel(ctx), newNaiveH1Conn(conn, !plainClient), userName, source, destination, func(error) { release() })
+		releaseUser = nil
 	} else {
-		n.newConnection(ctx, true, newNaiveH2Conn(request.Body, writer, !plainClient), userName, source, destination)
+		n.newConnection(ctx, newNaiveH2Conn(request.Body, writer, !plainClient), userName, source, destination)
 	}
 }
 
-func (n *Inbound) newConnection(ctx context.Context, waitForClose bool, conn net.Conn, userName string, source M.Socksaddr, destination M.Socksaddr) {
-	if !waitForClose {
-		n.routeConnection(ctx, conn, userName, source, destination, nil)
-		return
-	}
+func (n *Inbound) newConnection(ctx context.Context, conn net.Conn, userName string, source M.Socksaddr, destination M.Socksaddr) {
 	done := make(chan struct{})
 	wrapper := v2rayhttp.NewHTTP2Wrapper(conn)
 	n.routeConnection(ctx, conn, userName, source, destination, N.OnceClose(func(it error) {
@@ -254,6 +265,8 @@ func (n *Inbound) routeConnection(ctx context.Context, conn net.Conn, userName s
 }
 
 func (n *Inbound) isProbeHost(request *http.Request) bool {
+	n.usersMu.RLock()
+	defer n.usersMu.RUnlock()
 	_, found := n.probeHosts[requestTargetHostname(request)]
 	return found
 }
@@ -309,4 +322,48 @@ func generateNaivePaddingHeader() string {
 		padding[i] = '~'
 	}
 	return string(padding)
+}
+
+// UpdateUsers replaces credentials for new requests without closing existing
+// tunnels. An empty list denies new authentication while active tunnels drain.
+func (n *Inbound) UpdateUsers(users []auth.User) {
+	authenticator := auth.NewAuthenticator(users)
+	probeHosts := probeHostIndex(users)
+	n.usersMu.Lock()
+	n.authenticator = authenticator
+	n.probeHosts = probeHosts
+	n.usersMu.Unlock()
+}
+
+// authenticate reserves the user before routing starts, under the same lock as
+// credential updates. Release runs after the routed request has finished.
+func (n *Inbound) authenticate(username, password string) (func(), bool) {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	if n.authenticator == nil || !n.authenticator.Verify(username, password) {
+		return nil, false
+	}
+	if n.activeUsers == nil {
+		n.activeUsers = make(map[string]int)
+	}
+	n.activeUsers[username]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			n.usersMu.Lock()
+			defer n.usersMu.Unlock()
+			n.activeUsers[username]--
+			if n.activeUsers[username] == 0 {
+				delete(n.activeUsers, username)
+			}
+		})
+	}, true
+}
+
+// UserActive includes authenticated requests still waiting to be routed, so
+// callers cannot retire accounting before the last request has finished.
+func (n *Inbound) UserActive(username string) bool {
+	n.usersMu.RLock()
+	defer n.usersMu.RUnlock()
+	return n.activeUsers[username] > 0
 }

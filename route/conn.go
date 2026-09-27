@@ -388,7 +388,13 @@ func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.P
 			m.logger.DebugContext(ctx, "packet download closed: ", err)
 		}
 	}
-	if !done.Swap(true) {
+	// Naive keeps accounting for revoked users until their routed request ends.
+	// Its UoT stream must finish both copies before releasing that reservation.
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && metadata.InboundType == C.TypeNaive {
+		if done.Swap(true) {
+			onClose(err)
+		}
+	} else if !done.Swap(true) {
 		onClose(err)
 	}
 	common.Close(source, destination)
