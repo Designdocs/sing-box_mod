@@ -1,13 +1,13 @@
 package anytls
 
 import (
-	"net"
-
 	anytls "github.com/anytls/sing-anytls"
 	"github.com/sagernet/sing-box/option"
 )
 
 func (h *Inbound) AddUsers(users []option.AnyTLSUser) error {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
 	for _, user := range users {
 		h.uuidlist = append(h.uuidlist, user.Name)
 	}
@@ -23,17 +23,18 @@ func (h *Inbound) DelUsers(names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
+	h.connMu.Lock()
 
 	toDelete := make(map[string]struct{})
 	for _, name := range names {
 		toDelete[name] = struct{}{}
-		h.userconns.Range(func(key, value interface{}) bool {
-			if value.(string) == name {
-				key.(net.Conn).Close()
-				h.userconns.Delete(key)
-			}
-			return true
-		})
+	}
+	var connections []*inboundConnection
+	for conn, connection := range h.userconns {
+		if _, deleted := toDelete[connection.user]; deleted {
+			connections = append(connections, connection)
+			delete(h.userconns, conn)
+		}
 	}
 
 	remaining := make([]string, 0, len(h.uuidlist))
@@ -49,5 +50,10 @@ func (h *Inbound) DelUsers(names []string) error {
 		userList[i] = anytls.User{Name: uuid, Password: uuid}
 	}
 	h.service.UpdateUsers(userList)
+	h.connMu.Unlock()
+	for _, connection := range connections {
+		connection.cancel()
+		_ = connection.conn.Close()
+	}
 	return nil
 }

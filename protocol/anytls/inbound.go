@@ -35,9 +35,17 @@ type Inbound struct {
 	router    adapter.ConnectionRouterEx
 	logger    logger.ContextLogger
 	listener  *listener.Listener
-	service   *anytls.Service
-	userconns sync.Map
+	service   *service
+	connMu    sync.Mutex
+	closed    bool
+	userconns map[net.Conn]*inboundConnection
 	uuidlist  []string
+}
+
+type inboundConnection struct {
+	conn   net.Conn
+	cancel context.CancelFunc
+	user   string
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AnyTLSInboundOptions) (adapter.Inbound, error) {
@@ -60,7 +68,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		paddingScheme = []byte(strings.Join(options.PaddingScheme, "\n"))
 	}
 
-	service, err := anytls.NewService(anytls.ServiceConfig{
+	service, err := newService(anytls.ServiceConfig{
 		Users: common.Map(options.Users, func(it option.AnyTLSUser) anytls.User {
 			return (anytls.User)(it)
 		}),
@@ -83,7 +91,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	for _, user := range options.Users {
 		uuidlist = append(uuidlist, user.Name)
 	}
-	inbound.userconns = sync.Map{}
+	inbound.userconns = make(map[net.Conn]*inboundConnection)
 	inbound.uuidlist = uuidlist
 	return inbound, nil
 }
@@ -102,28 +110,74 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 }
 
 func (h *Inbound) Close() error {
+	h.connMu.Lock()
+	h.closed = true
+	connections := make([]*inboundConnection, 0, len(h.userconns))
+	for _, connection := range h.userconns {
+		connections = append(connections, connection)
+	}
+	clear(h.userconns)
+	h.connMu.Unlock()
+	for _, connection := range connections {
+		connection.cancel()
+		_ = connection.conn.Close()
+	}
 	return common.Close(h.listener, h.tlsConfig)
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	connection := &inboundConnection{conn: conn, cancel: cancel, user: metadata.User}
+	h.connMu.Lock()
+	if h.closed {
+		h.connMu.Unlock()
+		cancel()
+		N.CloseOnHandshakeFailure(conn, onClose, net.ErrClosed)
+		return
+	}
+	h.userconns[connection.conn] = connection
+	h.connMu.Unlock()
+	stop := context.AfterFunc(ctx, func() { _ = connection.conn.Close() })
+	var err error
+	defer func() {
+		stop()
+		cancel()
+		_ = connection.conn.Close()
+		h.connMu.Lock()
+		delete(h.userconns, connection.conn)
+		h.connMu.Unlock()
+		if onClose != nil {
+			onClose(err)
+		}
+	}()
 	if h.tlsConfig != nil {
-		tlsConn, err := tls.ServerHandshake(ctx, conn, h.tlsConfig)
+		var tlsConn net.Conn
+		tlsConn, err = tls.ServerHandshake(ctx, conn, h.tlsConfig)
 		if err != nil {
-			N.CloseOnHandshakeFailure(conn, onClose, err)
+			N.CloseOnHandshakeFailure(conn, nil, err)
 			h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source, ": TLS handshake"))
 			return
 		}
 		conn = tlsConn
 	}
-	h.userconns.Store(conn, metadata.User)
-	onClose = N.AppendClose(onClose, func(err error) {
-		h.userconns.Delete(conn)
+	err = h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, nil, func(user string, password [32]byte) bool {
+		return h.authenticate(connection, user, password)
 	})
-	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
 	if err != nil {
-		N.CloseOnHandshakeFailure(conn, onClose, err)
+		N.CloseOnHandshakeFailure(conn, nil, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
 	}
+}
+
+func (h *Inbound) authenticate(connection *inboundConnection, user string, password [32]byte) bool {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	current, active := h.service.users.Load()[password]
+	if h.closed || h.userconns[connection.conn] != connection || !active || current != user {
+		return false
+	}
+	connection.user = user
+	return true
 }
 
 type inboundHandler Inbound
