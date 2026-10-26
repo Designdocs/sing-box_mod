@@ -18,8 +18,8 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/uot"
 
-	anytls "github.com/anytls/sing-anytls"
-	"github.com/anytls/sing-anytls/session"
+	anytls "github.com/sagernet/sing-box/common/compat/anytls"
+	"github.com/sagernet/sing-box/common/compat/anytls/session"
 )
 
 func RegisterOutbound(registry *outbound.Registry) {

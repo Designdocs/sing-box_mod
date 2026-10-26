@@ -10,8 +10,8 @@ import (
 
 	"github.com/sagernet/sing/common"
 
-	anytls "github.com/anytls/sing-anytls"
-	"github.com/anytls/sing-anytls/session"
+	anytls "github.com/sagernet/sing-box/common/compat/anytls"
+	"github.com/sagernet/sing-box/common/compat/anytls/session"
 )
 
 const (

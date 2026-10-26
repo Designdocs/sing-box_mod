@@ -1,0 +1,13 @@
+{
+  "module": "github.com/anytls/sing-anytls",
+  "version": "v0.0.11",
+  "original_sha256": {
+    "client.go": "982910de783d0f8864a2bf254cec9e75ddd35a7ebd806a4cb243c44896c5bfe4",
+    "session/client.go": "6ece60c575b6b654ae29dada879f4d273dc4befa7b88ae07bdf204d1e8a9d740",
+    "session/session.go": "14e27f2cca6118a3025b1875ffe8963d2fe840f5554bd2ff4464dd0a5f162fb8",
+    "session/stream.go": "1f7ebfeb99ab5b0857d007dfedf664a667ef513aa3c95637ee58e86569a972d3",
+    "session/frame.go": "a7bbe42c049f314c6c2fda7059b7301e5452962057826bdfccf1d5bef81a8fc8",
+    "LICENSE": "df8e304aaa400c40a02bb48836a6172ee9ffb3666a5b28088d7201cf1a8b740e"
+  },
+  "purpose": "Synchronize stream close error; retain public padding, pipe, skiplist and util dependencies."
+}
