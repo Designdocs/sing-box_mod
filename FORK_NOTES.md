@@ -1,9 +1,9 @@
 # Fork notes — read before updating the kernel
 
-This fork (`Designdocs/sing-box_mod`, branch `dev-next`) carries one private
-feature on top of `upstream` (`wyx2685/sing-box_mod`, itself a fork of
-`SagerNet/sing-box`). **Nothing else is customised.** An upstream merge that
-loses it will silently break the ArtstationX browser extension: the extension
+This fork (`Designdocs/sing-box_mod`, branch `dev-next`) carries the private
+Naive feature on top of `upstream` (`wyx2685/sing-box_mod`, itself a fork of
+`SagerNet/sing-box`). It also retains the AnyTLS lifecycle fixes described
+below. An upstream merge that loses the Naive feature will silently break the ArtstationX browser extension: the extension
 keeps "connecting" and then rolls back to a direct connection, because its
 tunnel verification never succeeds.
 
@@ -88,3 +88,32 @@ user:secret -> 92592125f3859823.invalid
 Server side that is `TestProbeHostDerivationIsPinned`. Changing the hash,
 the truncation length or the suffix is a protocol break that requires
 shipping both sides together.
+
+## Stable compatibility backports (2026-10-26)
+
+The configured `wyx2685/sing-box_mod` upstream remains at `8d054dcd`
+(2025-12-02). Official SagerNet/sing-box v1.14.4 is a newer stable release,
+but a full merge spans 865 commits and conflicts in 138 paths, including the
+live user APIs and private Naive paths. This sync keeps the existing fork
+baseline instead of replacing those features.
+
+Two compatibility changes are required to run beside Xray v26.10.21:
+
+- REALITY is pinned to `83f621788ca8`. Its server key is now an X25519
+  `ecdh.PrivateKey`; the existing base64 setting, server names, destination,
+  short IDs and invalid-key rejection remain unchanged. The RFC 7748 Alice
+  key-pair regression checks that the configured identity is preserved.
+- Backport `f50ca2244b6d7bb592a1d088e7d32bd252721ed9` from official
+  v1.14.4: **Fix HTTP/2 transport reset with Go 1.27**. The four
+  `transport/v2rayhttp/force_close*` files match that upstream commit. The
+  standard Go 1.27 build uses the public idle-close API; its optional
+  `badlinkname` variant is not enabled by N2X's production tags.
+
+The previously published AnyTLS fix (`3686e55b`) remains intact: connection
+registration precedes authentication, close cancels pending sessions, failed
+streams are released, and user removal is synchronized with authentication.
+Keep `protocol/anytls/inbound_test.go`, the Naive safety net above, and the
+new REALITY tests when syncing again.
+
+This local integration uses Go 1.27.3 and N2X's local `go.work`. Publishing new
+module pins and deploying nodes are separate steps.

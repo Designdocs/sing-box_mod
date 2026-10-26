@@ -4,6 +4,7 @@ package tls
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
@@ -85,7 +86,10 @@ func NewRealityServer(ctx context.Context, logger log.Logger, options option.Inb
 	if len(privateKey) != 32 {
 		return nil, E.New("invalid private key")
 	}
-	tlsConfig.PrivateKey = privateKey
+	tlsConfig.PrivateKey, err = ecdh.X25519().NewPrivateKey(privateKey)
+	if err != nil {
+		return nil, E.Cause(err, "parse private key")
+	}
 	tlsConfig.MaxTimeDiff = time.Duration(options.Reality.MaxTimeDifference)
 
 	tlsConfig.ShortIds = make(map[[8]byte]bool)
