@@ -38,6 +38,8 @@ type Inbound struct {
 	service   *service
 	connMu    sync.Mutex
 	closed    bool
+	closeOnce sync.Once
+	closeErr  error
 	userconns map[net.Conn]*inboundConnection
 	uuidlist  []string
 }
@@ -96,10 +98,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(h.Close)
 	if h.tlsConfig != nil {
 		err := h.tlsConfig.Start()
 		if err != nil {
@@ -110,19 +113,26 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 }
 
 func (h *Inbound) Close() error {
-	h.connMu.Lock()
-	h.closed = true
-	connections := make([]*inboundConnection, 0, len(h.userconns))
-	for _, connection := range h.userconns {
-		connections = append(connections, connection)
-	}
-	clear(h.userconns)
-	h.connMu.Unlock()
-	for _, connection := range connections {
-		connection.cancel()
-		_ = connection.conn.Close()
-	}
-	return common.Close(h.listener, h.tlsConfig)
+	h.closeOnce.Do(func() {
+		h.connMu.Lock()
+		h.closed = true
+		connections := make([]*inboundConnection, 0, len(h.userconns))
+		for _, connection := range h.userconns {
+			connections = append(connections, connection)
+		}
+		clear(h.userconns)
+		h.connMu.Unlock()
+		for _, connection := range connections {
+			connection.cancel()
+			_ = connection.conn.Close()
+		}
+		h.closeErr = common.Close(h.listener, h.tlsConfig)
+	})
+	return h.closeErr
+}
+
+func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	h.NewConnectionEx(ctx, conn, metadata, onClose)
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -186,10 +196,10 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	metadata.Source = source
 	metadata.Destination = destination.Unwrap()
 	if userName, _ := auth.UserFromContext[string](ctx); userName != "" {

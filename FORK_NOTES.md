@@ -43,7 +43,7 @@ request and then sends `Proxy-Authorization` pre-emptively on every CONNECT.
 | `protocol/naive/inbound_plain.go` | **new** — plain-client proxy request handling |
 | `protocol/naive/inbound_plain_test.go` | **new** — the whole safety net |
 | `protocol/naive/inbound.go` | **modified** — `ServeHTTP` dispatch, `probeHosts` field |
-| `protocol/naive/inbound_conn.go` | **modified** — `padded bool` on the two conn constructors |
+| `protocol/naive/inbound_conn.go` | **modified** — plain/padded constructors and unconditional HTTP/2 flushing |
 
 The two *modified* files are the only ones an upstream merge can conflict on.
 Never resolve such a conflict by taking upstream's side wholesale: that
@@ -89,31 +89,43 @@ Server side that is `TestProbeHostDerivationIsPinned`. Changing the hash,
 the truncation length or the suffix is a protocol break that requires
 shipping both sides together.
 
-## Stable compatibility backports (2026-10-26)
+## Official stable migration (2026-10-26)
 
-The configured `wyx2685/sing-box_mod` upstream remains at `8d054dcd`
-(2025-12-02). Official SagerNet/sing-box v1.14.4 is a newer stable release,
-but a full merge spans 865 commits and conflicts in 138 paths, including the
-live user APIs and private Naive paths. This sync keeps the existing fork
-baseline instead of replacing those features.
+The fork now merges official SagerNet/sing-box v1.14.4 at
+`c005f35300ce76427dc285481ec5695f5b179cd2`, preserving the previous fork
+history (including `77c9325` and the AnyTLS memory fixes in `3686e55b`).
+The configured wyx2685 upstream remains frozen at `8d054dcd`.
 
-Two compatibility changes are required to run beside Xray v26.10.21:
+Upstream's Scope lifecycle owns each dynamic inbound through a separate
+cancellable scope. Remove closes that scope; failed replacement preserves
+the existing node, and removed scopes do not accumulate in the box cleanup
+list. Naive continues to rebuild on user changes, including closing hijacked
+HTTP/1 tunnels. Its probe-host derivation, plain/padded dispatch, buffered
+hijack data and HTTP/2 flush behavior are pinned by the existing tests.
 
-- REALITY is pinned to `83f621788ca8`. Its server key is now an X25519
-  `ecdh.PrivateKey`; the existing base64 setting, server names, destination,
-  short IDs and invalid-key rejection remain unchanged. The RFC 7748 Alice
-  key-pair regression checks that the configured identity is preserved.
-- Backport `f50ca2244b6d7bb592a1d088e7d32bd252721ed9` from official
-  v1.14.4: **Fix HTTP/2 transport reset with Go 1.27**. The four
-  `transport/v2rayhttp/force_close*` files match that upstream commit. The
-  standard Go 1.27 build uses the public idle-close API; its optional
-  `badlinkname` variant is not enabled by N2X's production tags.
+N2X per-node inbound sniff, destination override, domain strategy and UDP
+domain-unmapping options retain their previous pre-routing execution path,
+with an end-to-end sniff/resolve/buffered-request regression.
 
-The previously published AnyTLS fix (`3686e55b`) remains intact: connection
-registration precedes authentication, close cancels pending sessions, failed
-streams are released, and user removal is synchronized with authentication.
-Keep `protocol/anytls/inbound_test.go`, the Naive safety net above, and the
-new REALITY tests when syncing again.
+Runtime user changes publish immutable authentication snapshots. Each routed
+TCP/UDP session carries a credential identity rather than a mutable list
+index, passes a revocation gate, and closes when that identity is removed.
+VMess keeps its replay filter across user changes and can start refreshing
+legacy keys when a legacy user is added after startup.
 
-This local integration uses Go 1.27.3 and N2X's local `go.work`. Publishing new
-module pins and deploying nodes are separate steps.
+`internal/compat/UPSTREAMS.md` records the minimal source compatibility copies
+for services whose upstream authentication maps assume startup-only updates.
+Their wire formats remain upstream's; N2X interoperability tests use the public
+upstream clients. Vision TLS field pointers retain allocation provenance via
+`unsafe.Add`, validated under race/checkptr. The unchanged public upstream
+Vision client still needs its wire test outside race/checkptr.
+
+The AnyTLS session/failed-stream cleanup is retained with an idempotent close
+and the new Scope entry point. REALITY now follows official v1.14.4's utls
+backend, retains Xver and original base64 keys/short IDs, and is exercised by
+real VLESS/Vision, Trojan and AnyTLS handshakes. Xray's local TLS bridge adds
+the shared sing interface's handshake-timeout accessors.
+
+Local integration requires Go 1.27.3, GOEXPERIMENT=jsonv2 and N2X's go.work.
+Published remote module pins remain a separate release step; do not discard
+this workspace or build with GOWORK=off expecting these local changes.

@@ -2,6 +2,12 @@
 icon: material/new-box
 ---
 
+!!! quote "sing-box 1.14.0 中的更改"
+
+    :material-plus: [source_mac_address](#source_mac_address)  
+    :material-plus: [source_hostname](#source_hostname)  
+    :material-plus: [package_name_regex](#package_name_regex)
+
 !!! quote "sing-box 1.13.0 中的更改"
 
     :material-plus: [interface_address](#interface_address)  
@@ -22,6 +28,7 @@ icon: material/new-box
 
     :material-plus: [client](#client)  
     :material-delete-clock: [rule_set_ipcidr_match_source](#rule_set_ipcidr_match_source)  
+    :material-plus: [rule_set_ip_cidr_match_source](#rule_set_ip_cidr_match_source)  
     :material-plus: [process_path_regex](#process_path_regex)
 
 !!! quote "sing-box 1.8.0 中的更改"
@@ -121,6 +128,9 @@ icon: material/new-box
         "package_name": [
           "com.termux"
         ],
+        "package_name_regex": [
+          "^com\\.termux.*"
+        ],
         "user": [
           "sekai"
         ],
@@ -155,6 +165,12 @@ icon: material/new-box
         "preferred_by": [
           "tailscale",
           "wireguard"
+        ],
+        "source_mac_address": [
+          "00:11:22:33:44:55"
+        ],
+        "source_hostname": [
+          "my-device"
         ],
         "rule_set": [
           "geoip-cn",
@@ -194,9 +210,9 @@ icon: material/new-box
     (`port` || `port_range`) &&  
     (`source_geoip` || `source_ip_cidr` || `source_ip_is_private`) &&  
     (`source_port` || `source_port_range`) &&  
-    `other fields`
+    `其他字段`
 
-    另外，引用的规则集可视为被合并，而不是作为一个单独的规则子项。
+    当规则集仅包含一条默认规则且非 invert 时，其中字段视为按以上规则与外层规则合并；否则，作为一条 `其他字段` 匹配；不同规则集之间始终保持 or。
 
 #### inbound
 
@@ -254,7 +270,7 @@ icon: material/new-box
 
 !!! failure "已在 sing-box 1.8.0 废弃"
 
-    Geosite 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#geosite)。
+    Geosite 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#迁移-geosite-到规则集)。
 
 匹配 Geosite。
 
@@ -262,7 +278,7 @@ icon: material/new-box
 
 !!! failure "已在 sing-box 1.8.0 废弃"
 
-    GeoIP 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#geoip)。
+    GeoIP 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#迁移-geoip-到规则集)。
 
 匹配源 GeoIP。
 
@@ -270,7 +286,7 @@ icon: material/new-box
 
 !!! failure "已在 sing-box 1.8.0 废弃"
 
-    GeoIP 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#geoip)。
+    GeoIP 已废弃且可能在不久的将来移除，参阅 [迁移指南](/zh/migration/#迁移-geoip-到规则集)。
 
 匹配 GeoIP。
 
@@ -339,6 +355,12 @@ icon: material/new-box
 #### package_name
 
 匹配 Android 应用包名。
+
+#### package_name_regex
+
+!!! question "自 sing-box 1.14.0 起"
+
+使用正则表达式匹配 Android 应用包名。
 
 #### user
 
@@ -425,19 +447,15 @@ icon: material/new-box
 
 #### wifi_ssid
 
-!!! quote ""
-
-    仅在 Android 与 Apple 平台图形客户端中支持。
-
 匹配 WiFi SSID。
+
+参阅 [Wi-Fi 状态](/zh/configuration/shared/wifi-state/)。
 
 #### wifi_bssid
 
-!!! quote ""
-
-    仅在 Android 与 Apple 平台图形客户端中支持。
-
 匹配 WiFi BSSID。
+
+参阅 [Wi-Fi 状态](/zh/configuration/shared/wifi-state/)。
 
 #### preferred_by
 
@@ -449,6 +467,27 @@ icon: material/new-box
 |-------------|--------------------------------|
 | `tailscale` | 匹配 MagicDNS 域名和对端的 allowed IPs |
 | `wireguard` | 匹配对端的 allowed IPs              |
+| `bridge`    | 匹配除本机本地地址外的所有地址，仅在[预匹配](/zh/configuration/shared/pre-match/)中 |
+
+#### source_mac_address
+
+!!! question "自 sing-box 1.14.0 起"
+
+!!! quote ""
+
+    仅支持 Linux、macOS，或在 Android 和 macOS 图形客户端中支持。参阅 [邻居解析](/configuration/shared/neighbor/) 了解设置方法。
+
+匹配源设备 MAC 地址。
+
+#### source_hostname
+
+!!! question "自 sing-box 1.14.0 起"
+
+!!! quote ""
+
+    仅支持 Linux、macOS，或在 Android 和 macOS 图形客户端中支持。参阅 [邻居解析](/configuration/shared/neighbor/) 了解设置方法。
+
+匹配源设备从 DHCP 租约获取的主机名。
 
 #### rule_set
 

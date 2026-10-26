@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
+	"sync"
 
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/quic-go/http3"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
@@ -20,9 +20,9 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	sHTTP "github.com/sagernet/sing/protocol/http"
 
@@ -37,11 +37,14 @@ func RegisterHTTP3Transport(registry *dns.TransportRegistry) {
 
 type HTTP3Transport struct {
 	dns.TransportAdapter
-	logger      logger.ContextLogger
-	dialer      N.Dialer
-	destination *url.URL
-	headers     http.Header
-	transport   *http3.Transport
+	logger          logger.ContextLogger
+	dialer          N.Dialer
+	destination     *url.URL
+	headers         http.Header
+	serverAddr      M.Socksaddr
+	tlsConfig       *tls.STDConfig
+	transportAccess sync.Mutex
+	transport       *http3.Transport
 }
 
 func NewHTTP3(ctx context.Context, logger log.ContextLogger, tag string, options option.RemoteHTTPSDNSServerOptions) (adapter.DNSTransport, error) {
@@ -55,6 +58,7 @@ func NewHTTP3(ctx context.Context, logger log.ContextLogger, tag string, options
 	if err != nil {
 		return nil, err
 	}
+	tlsConfig.SetNextProtos([]string{http3.NextProtoH3})
 	stdConfig, err := tlsConfig.STDConfig()
 	if err != nil {
 		return nil, err
@@ -70,15 +74,14 @@ func NewHTTP3(ctx context.Context, logger log.ContextLogger, tag string, options
 			host = options.Server
 		}
 	}
-	destinationURL := url.URL{
-		Scheme: "https",
-		Host:   host,
-	}
-	if destinationURL.Host == "" {
-		destinationURL.Host = options.Server
-	}
+	destinationAddress := M.ParseSocksaddrHostPort(host, options.ServerPort)
+	destinationURL := url.URL{Scheme: "https"}
 	if options.ServerPort != 0 && options.ServerPort != 443 {
-		destinationURL.Host = net.JoinHostPort(destinationURL.Host, strconv.Itoa(int(options.ServerPort)))
+		destinationURL.Host = destinationAddress.String()
+	} else if destinationAddress.IsIPv6() {
+		destinationURL.Host = "[" + destinationAddress.AddrString() + "]"
+	} else {
+		destinationURL.Host = destinationAddress.AddrString()
 	}
 	path := options.Path
 	if path == "" {
@@ -95,31 +98,59 @@ func NewHTTP3(ctx context.Context, logger log.ContextLogger, tag string, options
 	if !serverAddr.IsValid() {
 		return nil, E.New("invalid server address: ", serverAddr)
 	}
-	return &HTTP3Transport{
+	t := &HTTP3Transport{
 		TransportAdapter: dns.NewTransportAdapterWithRemoteOptions(C.DNSTypeHTTP3, tag, options.RemoteDNSServerOptions),
 		logger:           logger,
 		dialer:           transportDialer,
 		destination:      &destinationURL,
 		headers:          headers,
-		transport: &http3.Transport{
-			Dial: func(ctx context.Context, addr string, tlsCfg *tls.STDConfig, cfg *quic.Config) (*quic.Conn, error) {
-				conn, dialErr := transportDialer.DialContext(ctx, N.NetworkUDP, serverAddr)
-				if dialErr != nil {
-					return nil, dialErr
-				}
-				return quic.DialEarly(ctx, bufio.NewUnbindPacketConn(conn), conn.RemoteAddr(), tlsCfg, cfg)
-			},
-			TLSClientConfig: stdConfig,
+		serverAddr:       serverAddr,
+		tlsConfig:        stdConfig,
+	}
+	t.transport = t.newTransport()
+	return t, nil
+}
+
+func (t *HTTP3Transport) newTransport() *http3.Transport {
+	return &http3.Transport{
+		Dial: func(ctx context.Context, _ string, _ *tls.STDConfig, cfg *quic.Config) (*quic.Conn, error) {
+			conn, dialErr := t.dialer.DialContext(ctx, N.NetworkUDP, t.serverAddr)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			quicConn, dialErr := quic.DialEarlyConn(ctx, conn, t.tlsConfig, cfg)
+			if dialErr != nil {
+				conn.Close()
+				return nil, dialErr
+			}
+			// quic-go does not take ownership of the packet conn passed to
+			// DialEarly: when the connection ends it only stops reading.
+			go func() {
+				<-quicConn.Context().Done()
+				conn.Close()
+			}()
+			return quicConn, nil
 		},
-	}, nil
+	}
 }
 
-func (t *HTTP3Transport) Start(stage adapter.StartStage) error {
-	return nil
+func (t *HTTP3Transport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage != adapter.StartStateStart {
+		return nil
+	}
+	scope.Add(func() error {
+		t.transportAccess.Lock()
+		defer t.transportAccess.Unlock()
+		return t.transport.Close()
+	})
+	return dialer.InitializeDetour(t.dialer)
 }
 
-func (t *HTTP3Transport) Close() error {
-	return t.transport.Close()
+func (t *HTTP3Transport) Reset() {
+	t.transportAccess.Lock()
+	defer t.transportAccess.Unlock()
+	t.transport.Close()
+	t.transport = t.newTransport()
 }
 
 func (t *HTTP3Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
@@ -140,7 +171,10 @@ func (t *HTTP3Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	request.Header = t.headers.Clone()
 	request.Header.Set("Content-Type", transport.MimeType)
 	request.Header.Set("Accept", transport.MimeType)
-	response, err := t.transport.RoundTrip(request)
+	t.transportAccess.Lock()
+	currentTransport := t.transport
+	t.transportAccess.Unlock()
+	response, err := currentTransport.RoundTrip(request)
 	requestBuffer.Release()
 	if err != nil {
 		return nil, err
@@ -152,12 +186,12 @@ func (t *HTTP3Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	var responseMessage mDNS.Msg
 	if response.ContentLength > 0 {
 		responseBuffer := buf.NewSize(int(response.ContentLength))
+		defer responseBuffer.Release()
 		_, err = responseBuffer.ReadFullFrom(response.Body, int(response.ContentLength))
 		if err != nil {
 			return nil, err
 		}
 		err = responseMessage.Unpack(responseBuffer.Bytes())
-		responseBuffer.Release()
 	} else {
 		rawMessage, err = io.ReadAll(response.Body)
 		if err != nil {
@@ -169,4 +203,10 @@ func (t *HTTP3Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		return nil, err
 	}
 	return &responseMessage, nil
+}
+
+func (t *HTTP3Transport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
+	go func() {
+		callback(t.Exchange(ctx, message))
+	}()
 }

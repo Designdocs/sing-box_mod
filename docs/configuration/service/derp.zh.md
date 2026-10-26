@@ -36,7 +36,7 @@ DERP 服务是一个 Tailscale DERP 服务器，类似于 [derper](https://pkg.g
 
 #### tls
 
-TLS 配置，参阅 [TLS](/zh/configuration/shared/tls/#inbound)。
+TLS 配置，参阅 [TLS](/zh/configuration/shared/tls/#入站)。
 
 #### config_path
 
@@ -58,9 +58,9 @@ Derper 配置文件路径。
 
 ```json
 {
-  "url": "https://my-headscale.com/verify",
+  "url": "",
 
-  ... // 拨号字段
+  ... // HTTP 客户端字段
 }
 ```
 
@@ -96,7 +96,7 @@ Derper 配置文件路径。
 - `server`：**必填** DERP 服务器地址。
 - `server_port`：**必填** DERP 服务器端口。
 - `host`：自定义 DERP 主机名。
-- `tls`：[TLS](/zh/configuration/shared/tls/#outbound)
+- `tls`：[TLS](/zh/configuration/shared/tls/#出站)
 - `拨号字段`：[拨号字段](/zh/configuration/shared/dial/)
 
 #### mesh_psk

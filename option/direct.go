@@ -3,7 +3,7 @@ package option
 import (
 	"context"
 
-	"github.com/sagernet/sing-box/experimental/deprecated"
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 )
 
@@ -17,11 +17,11 @@ type DirectInboundOptions struct {
 type _DirectOutboundOptions struct {
 	DialerOptions
 	// Deprecated: Use Route Action instead
-	OverrideAddress string `json:"override_address,omitempty"`
+	OverrideAddress string `json:"override_address,omitempty" schema:"omit"`
 	// Deprecated: Use Route Action instead
-	OverridePort uint16 `json:"override_port,omitempty"`
+	OverridePort uint16 `json:"override_port,omitempty" schema:"omit"`
 	// Deprecated: removed
-	ProxyProtocol uint8 `json:"proxy_protocol,omitempty"`
+	ProxyProtocol uint8 `json:"proxy_protocol,omitempty" schema:"omit"`
 }
 
 type DirectOutboundOptions _DirectOutboundOptions
@@ -31,8 +31,9 @@ func (d *DirectOutboundOptions) UnmarshalJSONContext(ctx context.Context, conten
 	if err != nil {
 		return err
 	}
+	//nolint:staticcheck
 	if d.OverrideAddress != "" || d.OverridePort != 0 {
-		deprecated.Report(ctx, deprecated.OptionDestinationOverrideFields)
+		return E.New("destination override fields in direct outbound are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use route options instead")
 	}
 	return nil
 }

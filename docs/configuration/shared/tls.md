@@ -2,18 +2,28 @@
 icon: material/new-box
 ---
 
+!!! quote "Changes in sing-box 1.14.0"
+
+    :material-plus: [certificate_provider](#certificate_provider)  
+    :material-plus: [handshake_timeout](#handshake_timeout)  
+    :material-plus: [spoof](#spoof)  
+    :material-plus: [spoof_method](#spoof_method)  
+    :material-plus: [engine](#engine)  
+    :material-delete-clock: [acme](#acme-fields)
+
 !!! quote "Changes in sing-box 1.13.0"
 
-    :material-plus: [kernel_tx](#kernel_tx)
-    :material-plus: [kernel_rx](#kernel_rx)
-    :material-plus: [curve_preferences](#curve_preferences)
-    :material-plus: [certificate_public_key_sha256](#certificate_public_key_sha256)
-    :material-plus: [client_certificate](#client_certificate)
-    :material-plus: [client_certificate_path](#client_certificate_path)
-    :material-plus: [client_key](#client_key)
-    :material-plus: [client_key_path](#client_key_path)
-    :material-plus: [client_authentication](#client_authentication)
-    :material-plus: [client_certificate_public_key_sha256](#client_certificate_public_key_sha256)
+    :material-plus: [kernel_tx](#kernel_tx)  
+    :material-plus: [kernel_rx](#kernel_rx)  
+    :material-plus: [curve_preferences](#curve_preferences)  
+    :material-plus: [certificate_public_key_sha256](#certificate_public_key_sha256)  
+    :material-plus: [client_certificate](#client_certificate)  
+    :material-plus: [client_certificate_path](#client_certificate_path)  
+    :material-plus: [client_key](#client_key)  
+    :material-plus: [client_key_path](#client_key_path)  
+    :material-plus: [client_authentication](#client_authentication)  
+    :material-plus: [client_certificate_public_key_sha256](#client_certificate_public_key_sha256)  
+    :material-plus: [ech.query_server_name](#query_server_name)
 
 !!! quote "Changes in sing-box 1.12.0"
 
@@ -25,7 +35,7 @@ icon: material/new-box
 
 !!! quote "Changes in sing-box 1.10.0"
 
-    :material-alert-decagram: [utls](#utls)  
+    :material-alert-decagram: [utls](#utls)
 
 ### Inbound
 
@@ -48,6 +58,11 @@ icon: material/new-box
   "key_path": "",
   "kernel_tx": false,
   "kernel_rx": false,
+  "handshake_timeout": "",
+  "certificate_provider": "",
+
+  // Deprecated
+
   "acme": {
     "domain": [],
     "data_directory": "",
@@ -96,6 +111,7 @@ icon: material/new-box
 ```json
 {
   "enabled": true,
+  "engine": "",
   "disable_sni": false,
   "server_name": "",
   "insecure": false,
@@ -114,10 +130,16 @@ icon: material/new-box
   "fragment": false,
   "fragment_fallback_delay": "",
   "record_fragment": false,
+  "spoof": "",
+  "spoof_method": "",
+  "kernel_tx": false,
+  "kernel_rx": false,
+  "handshake_timeout": "",
   "ech": {
     "enabled": false,
     "config": [],
     "config_path": "",
+    "query_server_name": "",
 
     // Deprecated
     "pq_signature_schemes_enabled": false,
@@ -172,6 +194,53 @@ Cipher suite values:
 
 Enable TLS.
 
+#### engine
+
+!!! question "Since sing-box 1.14.0"
+
+==Client only==
+
+TLS engine to use.
+
+Values:
+
+* `go` (default)
+* `apple`
+* `windows`
+
+Supported fields:
+
+* `server_name`
+* `insecure`
+* `alpn`
+* `min_version`
+* `max_version`
+* `certificate` / `certificate_path`
+* `certificate_public_key_sha256`
+* `handshake_timeout`
+
+Unsupported fields:
+
+* `disable_sni`
+* `cipher_suites`
+* `curve_preferences`
+* `client_certificate` / `client_certificate_path` / `client_key` / `client_key_path`
+* `fragment` / `record_fragment`
+* `kernel_tx` / `kernel_rx`
+* `ech`
+* `utls`
+* `reality`
+
+!!! note ""
+
+    `windows` uses Schannel via SSPI. Only available on Windows build 17763 or later (Windows 10 version 1809, Windows Server 2019, or newer).
+
+!!! note ""
+
+    TLS 1.3 is only negotiated on Windows 11 or Windows Server 2022 and newer.
+
+The default version range is TLS 1.2 to TLS 1.3, matching the `go` engine.
+
 #### disable_sni
 
 ==Client only==
@@ -203,8 +272,7 @@ See [Application-Layer Protocol Negotiation](https://en.wikipedia.org/wiki/Appli
 
 The minimum TLS version that is acceptable.
 
-By default, TLS 1.2 is currently used as the minimum when acting as a
-client, and TLS 1.0 when acting as a server.
+TLS 1.2 is used by default.
 
 #### max_version
 
@@ -406,6 +474,26 @@ Enable kernel TLS transmit support.
 
 Enable kernel TLS receive support.
 
+#### handshake_timeout
+
+!!! question "Since sing-box 1.14.0"
+
+TLS handshake timeout, in golang's Duration format.
+
+`15s` is used by default.
+
+#### certificate_provider
+
+!!! question "Since sing-box 1.14.0"
+
+==Server only==
+
+A string or an object.
+
+When string, the tag of a shared [Certificate Provider](/configuration/shared/certificate-provider/).
+
+When object, an inline certificate provider. See [Certificate Provider](/configuration/shared/certificate-provider/) for available types and fields.
+
 ## Custom TLS support
 
 !!! info "QUIC support"
@@ -416,9 +504,18 @@ Enable kernel TLS receive support.
 
 ==Client only==
 
-!!! failure ""
-    
-    There is no evidence that GFW detects and blocks servers based on TLS client fingerprinting, and using an imperfect emulation that has not been security reviewed could pose security risks.
+!!! failure "Not Recommended"
+
+    uTLS has had repeated fingerprinting vulnerabilities discovered by researchers.
+
+    uTLS is a Go library that attempts to imitate browser TLS fingerprints by copying
+    ClientHello structure. However, browsers use completely different TLS stacks
+    (Chrome uses BoringSSL, Firefox uses NSS) with distinct implementation behaviors
+    that cannot be replicated by simply copying the handshake format, making detection possible.
+    Additionally, the library lacks active maintenance and has poor code quality,
+    making it unsuitable for censorship circumvention.
+
+    For TLS fingerprint resistance, use [NaiveProxy](/configuration/inbound/naive/) instead.
 
 uTLS is a fork of "crypto/tls", which provides ClientHello fingerprinting resistance.
 
@@ -458,7 +555,7 @@ The ECH key and configuration can be generated by `sing-box generate ech-keypair
 
 !!! failure "Deprecated in sing-box 1.12.0"
 
-    ECH support has been migrated to use stdlib in sing-box 1.12.0, which does not come with support for PQ signature schemes, so `pq_signature_schemes_enabled` has been deprecated and no longer works.
+    `pq_signature_schemes_enabled` is deprecated in sing-box 1.12.0 and removed in sing-box 1.13.0.
 
 Enable support for post-quantum peer certificate signature schemes.
 
@@ -466,7 +563,7 @@ Enable support for post-quantum peer certificate signature schemes.
 
 !!! failure "Deprecated in sing-box 1.12.0"
 
-    `dynamic_record_sizing_disabled` has nothing to do with ECH, was added by mistake, has been deprecated and no longer works.
+    `dynamic_record_sizing_disabled` is deprecated in sing-box 1.12.0 and removed in sing-box 1.13.0.
 
 Disables adaptive sizing of TLS records.
 
@@ -504,6 +601,16 @@ If empty, load from DNS will be attempted.
 The path to ECH configuration, in PEM format.
 
 If empty, load from DNS will be attempted.
+
+#### query_server_name
+
+!!! question "Since sing-box 1.13.0"
+
+==Client only==
+
+Overrides the domain name used for ECH HTTPS record queries.
+
+If empty, `server_name` is used for queries.
 
 #### fragment
 
@@ -543,7 +650,43 @@ The fallback value used when TLS segmentation cannot automatically determine the
 
 Fragment TLS handshake into multiple TLS records to bypass firewalls.
 
+#### spoof
+
+!!! question "Since sing-box 1.14.0"
+
+==Client only==
+
+!!! quote ""
+
+    Only supported on Linux, macOS, and Windows, and requires elevated privileges.
+
+Inject a forged TLS ClientHello carrying a whitelisted SNI before the real one,
+to fool SNI-filtering middleboxes that permit specific hostnames.
+
+Requires `CAP_NET_RAW` and `CAP_NET_ADMIN` on Linux, root on macOS, and
+Administrator on Windows. Windows on ARM64 is not supported.
+
+#### spoof_method
+
+!!! question "Since sing-box 1.14.0"
+
+==Client only==
+
+How the forged segment is rejected by the real server.
+
+| Value                      | Behavior                                                                                                       |
+|----------------------------|----------------------------------------------------------------------------------------------------------------|
+| `wrong-sequence` (default) | The forged segment's TCP sequence number is placed before the server's receive window.                         |
+| `wrong-checksum`           | The forged segment's TCP checksum is deliberately invalid.                                                     |
+| `wrong-ack`                | The forged segment's TCP acknowledgment number is placed before the server's send window.                      |
+| `wrong-md5`                | The forged segment carries a TCP-MD5 signature option.                                                         |
+| `wrong-timestamp`          | The forged segment carries a backdated TCP timestamp. Linux/Windows only; not supported on macOS.              |
+
 ### ACME Fields
+
+!!! failure "Deprecated in sing-box 1.14.0"
+
+    Inline ACME options are deprecated in sing-box 1.14.0 and will be removed in sing-box 1.16.0, check [Migration](/migration/#migrate-inline-acme-to-certificate-provider).
 
 #### domain
 

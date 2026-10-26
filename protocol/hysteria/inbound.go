@@ -2,7 +2,10 @@ package hysteria
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"net"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -10,9 +13,9 @@ import (
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/internal/compat/singquic/hysteria"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-quic/hysteria"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
 	M "github.com/sagernet/sing/common/metadata"
@@ -25,16 +28,17 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	listener     *listener.Listener
-	tlsConfig    tls.ServerConfig
-	service      *hysteria.Service[int]
-	userNameList []string
+	usersAccess sync.Mutex
+	usersState  dynamicuser.Registry
+	router      adapter.Router
+	logger      log.ContextLogger
+	listener    *listener.Listener
+	tlsConfig   tls.ServerConfig
+	service     *hysteria.Service[dynamicuser.User]
+	users       []option.HysteriaUser
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HysteriaInboundOptions) (adapter.Inbound, error) {
-	options.UDPFragmentDefault = true
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
@@ -70,43 +74,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	service, err := hysteria.NewService[int](hysteria.ServiceOptions{
+	service, err := hysteria.NewService[dynamicuser.User](hysteria.ServiceOptions{
 		Context:       ctx,
 		Logger:        logger,
 		SendBPS:       sendBps,
 		ReceiveBPS:    receiveBps,
 		XPlusPassword: options.Obfs,
 		TLSConfig:     tlsConfig,
+		QUICOptions:   buildInboundQUICOptions(options),
 		UDPTimeout:    udpTimeout,
 		Handler:       inbound,
-
-		// Legacy options
-
-		ConnReceiveWindow:   options.ReceiveWindowConn,
-		StreamReceiveWindow: options.ReceiveWindowClient,
-		MaxIncomingStreams:  int64(options.MaxConnClient),
-		DisableMTUDiscovery: options.DisableMTUDiscovery,
 	})
 	if err != nil {
 		return nil, err
 	}
-	userList := make([]int, 0, len(options.Users))
-	userNameList := make([]string, 0, len(options.Users))
-	userPasswordList := make([]string, 0, len(options.Users))
-	for index, user := range options.Users {
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
-		var password string
-		if user.AuthString != "" {
-			password = user.AuthString
-		} else {
-			password = string(user.Auth)
-		}
-		userPasswordList = append(userPasswordList, password)
-	}
-	service.UpdateUsers(userList, userPasswordList)
 	inbound.service = service
-	inbound.userNameList = userNameList
+	if err = inbound.setUsers(options.Users); err != nil {
+		return nil, err
+	}
 	return inbound, nil
 }
 
@@ -115,20 +100,30 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	metadata.OriginDestination = h.listener.UDPAddr()
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
+	if !loaded {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+		return
+	}
+	if userName := identity.Name; userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
+	}
+	var admitted bool
+	ctx, onClose, admitted = h.usersState.Track(ctx, conn, identity, onClose)
+	if !admitted {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrPermission)
+		return
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
@@ -138,45 +133,55 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	metadata.OriginDestination = h.listener.UDPAddr()
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
+	if !loaded {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+		return
+	}
+	if userName := identity.Name; userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
 	}
+	var admitted bool
+	ctx, onClose, admitted = h.usersState.Track(ctx, conn, identity, onClose)
+	if !admitted {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrPermission)
+		return
+	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(h.usersState.Close)
 	if h.tlsConfig != nil {
 		err := h.tlsConfig.Start()
 		if err != nil {
 			return err
 		}
+		scope.Add(h.tlsConfig.Close)
 	}
 	packetConn, err := h.listener.ListenUDP()
 	if err != nil {
 		return err
 	}
-	return h.service.Start(packetConn)
-}
-
-func (h *Inbound) Close() error {
-	return common.Close(
-		h.listener,
-		h.tlsConfig,
-		common.PtrOrNil(h.service),
-	)
+	scope.Add(h.listener.Close)
+	err = h.service.Start(packetConn)
+	if err != nil {
+		return err
+	}
+	scope.Add(h.service.Close)
+	return nil
 }

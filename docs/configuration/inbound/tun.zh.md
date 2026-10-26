@@ -2,9 +2,27 @@
 icon: material/new-box
 ---
 
+!!! quote "sing-box 1.14.0 中的更改"
+
+    :material-plus: [include_mac_address](#include_mac_address)  
+    :material-plus: [exclude_mac_address](#exclude_mac_address)  
+    :material-plus: [dns_mode](#dns_mode)  
+    :material-plus: [dns_address](#dns_address)  
+    :material-plus: [netns](#netns)  
+    :material-plus: [udp_mapping](/zh/configuration/shared/udp-nat/#udp_mapping)  
+    :material-plus: [udp_filtering](/zh/configuration/shared/udp-nat/#udp_filtering)  
+    :material-plus: [udp_nat_max](/zh/configuration/shared/udp-nat/#udp_nat_max)
+
+!!! quote "sing-box 1.13.3 中的更改"
+
+    :material-alert: [strict_route](#strict_route)
+
 !!! quote "sing-box 1.13.0 中的更改"
 
-    :material-plus: [exclude_mptcp](#exclude_mptcp)
+    :material-plus: [auto_redirect_reset_mark](#auto_redirect_reset_mark)  
+    :material-plus: [auto_redirect_nfqueue](#auto_redirect_nfqueue)  
+    :material-plus: [exclude_mptcp](#exclude_mptcp)  
+    :material-plus: [auto_redirect_iproute2_fallback_rule_index](#auto_redirect_iproute2_fallback_rule_index)
 
 !!! quote "sing-box 1.12.0 中的更改"
 
@@ -26,7 +44,7 @@ icon: material/new-box
     :material-delete-clock: [inet6_route_address](#inet6_route_address)  
     :material-plus: [route_exclude_address](#route_address)  
     :material-delete-clock: [inet4_route_exclude_address](#inet4_route_exclude_address)  
-    :material-delete-clock: [inet6_route_exclude_address](#inet6_route_exclude_address)   
+    :material-delete-clock: [inet6_route_exclude_address](#inet6_route_exclude_address)  
     :material-plus: [iproute2_table_index](#iproute2_table_index)  
     :material-plus: [iproute2_rule_index](#iproute2_table_index)  
     :material-plus: [auto_redirect](#auto_redirect)  
@@ -38,7 +56,7 @@ icon: material/new-box
 !!! quote "sing-box 1.9.0 中的更改"
 
     :material-plus: [platform.http_proxy.bypass_domain](#platformhttp_proxybypass_domain)  
-    :material-plus: [platform.http_proxy.match_domain](#platformhttp_proxymatch_domain)  
+    :material-plus: [platform.http_proxy.match_domain](#platformhttp_proxymatch_domain)
 
 !!! quote "sing-box 1.8.0 中的更改"
 
@@ -61,12 +79,20 @@ icon: material/new-box
     "fdfe:dcba:9876::1/126"
   ],
   "mtu": 9000,
+  "dns_mode": "hijack",
+  "dns_address": [
+    "172.18.0.2",
+    "fdfe:dcba:9876::2"
+  ],
   "auto_route": true,
   "iproute2_table_index": 2022,
   "iproute2_rule_index": 9000,
   "auto_redirect": true,
   "auto_redirect_input_mark": "0x2023",
   "auto_redirect_output_mark": "0x2024",
+  "auto_redirect_reset_mark": "0x2025",
+  "auto_redirect_nfqueue": 100,
+  "auto_redirect_iproute2_fallback_rule_index": 32768,
   "exclude_mptcp": false,
   "loopback_address": [
     "10.7.0.1"
@@ -90,7 +116,9 @@ icon: material/new-box
     "geoip-cn"
   ],
   "endpoint_independent_nat": false,
-  "udp_timeout": "5m",
+
+  ... // UDP NAT 字段
+
   "stack": "system",
   "include_interface": [
     "lan0"
@@ -119,6 +147,12 @@ icon: material/new-box
   ],
   "exclude_package": [
     "com.android.captiveportallogin"
+  ],
+  "include_mac_address": [
+    "00:11:22:33:44:55"
+  ],
+  "exclude_mac_address": [
+    "66:77:88:99:aa:bb"
   ],
   "platform": {
     "http_proxy": {
@@ -171,6 +205,20 @@ icon: material/new-box
 
 虚拟设备名称，默认自动选择。
 
+#### netns
+
+!!! question "自 sing-box 1.14.0 起"
+
+!!! quote ""
+
+    仅支持 Linux。
+
+在指定的网络命名空间中创建 tun 接口，可以是名称、路径，或[网络命名空间](/zh/configuration/network-namespace/)的标签。
+
+设置后，`auto_route` 和 `auto_redirect` 在该命名空间内生效；若命名空间归当前用户所有，则无需 root 权限。
+
+与 `platform` 冲突。
+
 #### address
 
 !!! question "自 sing-box 1.10.0 起"
@@ -200,6 +248,42 @@ tun 接口的 IPv6 前缀。
 #### mtu
 
 最大传输单元。
+
+#### dns_mode
+
+!!! question "自 sing-box 1.14.0 起"
+
+TUN 接口上 DNS 的处理方式。
+
+| 模式       | 描述                                                                                                  |
+|------------|-------------------------------------------------------------------------------------------------------|
+| `disabled` | 不设置原生 DNS，也不劫持 DNS 流量。                                                                    |
+| `native`   | 尽可能设置平台的原生接口 DNS：Windows 与 Apple 上的接口 DNS，Linux 上的 `systemd-resolved` 接口 DNS。   |
+| `hijack`   | 与 `native` 相同，并额外执行下文所述的 53 端口劫持。                                                  |
+
+启用 [`auto_route`](#auto_route) 时默认使用 `hijack`，否则默认使用 `disabled`。
+
+`hijack` 在 `native` 之上额外执行：
+
+*Linux*：发往本机接口地址（如 `127.0.0.53` 或本机 LAN 接口 IP）的 DNS 不会被劫持。
+
+- 未启用 `auto_redirect` 时：发往直连子网的 53 端口流量也会经由 TUN 路由。
+- 启用 `auto_redirect` 时：53 端口流量被重定向至
+  [`dns_address`](#dns_address)。
+
+*Windows 启用 [`strict_route`](#strict_route) 时*：阻止经由非 TUN 接口的 53 端口流量。
+
+#### dns_address
+
+!!! question "自 sing-box 1.14.0 起"
+
+[`dns_mode`](#dns_mode) 使用的 DNS 服务器地址列表。
+
+未设置时，使用 [`address`](#address) 中第一个 IPv4 和 IPv6 条目的下一个地址，
+发往该地址的连接按 [`hijack-dns`](/zh/configuration/route/rule_action/#hijack-dns) 路由动作处理。
+
+设置后，请配置 [`hijack-dns`](/zh/configuration/route/rule_action/#hijack-dns)
+路由规则以处理发往这些地址的 DNS 流量。
 
 #### gso
 
@@ -282,13 +366,40 @@ tun 接口的 IPv6 前缀。
 
 默认使用 `0x2024`。
 
+#### auto_redirect_reset_mark
+
+!!! question "自 sing-box 1.13.0 起"
+
+`auto_redirect` 预匹配使用的连接重置标记。
+
+默认使用 `0x2025`。
+
+#### auto_redirect_nfqueue
+
+!!! question "自 sing-box 1.13.0 起"
+
+`auto_redirect` 预匹配使用的 NFQueue 编号。
+
+默认使用 `100`。
+
+#### auto_redirect_iproute2_fallback_rule_index
+
+!!! question "自 sing-box 1.12.18 起"
+
+`auto_redirect` 生成的 iproute2 回退规则索引。
+
+此规则在系统默认规则（32766: main，32767: default）之后检查，
+仅当系统路由表中未找到路由时才将流量路由到 sing-box 路由表。
+
+默认使用 `32768`。
+
 #### exclude_mptcp
 
 !!! question "自 sing-box 1.13.0 起"
 
 !!! quote ""
 
-    仅支持 Linux，且需要 nftables，`auto_route` 和 `auto_redirect` 已启用。 
+    仅支持 Linux，且需要 nftables，`auto_route` 和 `auto_redirect` 已启用。
 
 由于协议限制，MPTCP 无法被透明代理。
 
@@ -314,6 +425,9 @@ tun 接口的 IPv6 前缀。
 
 * 使不支持的网络不可达。
 * 出于历史遗留原因，当未启用 `strict_route` 或 `auto_redirect` 时，所有 ICMP 流量将不会通过 TUN。
+* 当启用 `auto_redirect` 时，`strict_route` 也影响 `SO_BINDTODEVICE` 流量：
+    * 启用：`SO_BINDTODEVICE` 流量被重定向通过 sing-box。
+    * 禁用：`SO_BINDTODEVICE` 流量绕过 sing-box。
 
 *在 Windows 中*：
 
@@ -386,8 +500,8 @@ tun 接口的 IPv6 前缀。
     将指定规则集中的目标 IP CIDR 规则添加到路由，相当于添加到 `route_address`。
     不匹配的流量将绕过 sing-box 路由。
 
-    请注意，由于 Android VpnService 无法处理大量路由（DeadSystemException），
-    因此它**在 Android 图形客户端上不起作用**，但除此之外，它在所有命令行客户端和 Apple 平台上都可以正常工作。
+    请注意，由于无法处理大量路由，它**在 Android 和 Apple 图形客户端上不起作用**，
+    但除此之外，它在所有命令行客户端以及 Linux 和 Windows 图形客户端上都可以正常工作。
 
 #### route_exclude_address_set
 
@@ -411,20 +525,14 @@ tun 接口的 IPv6 前缀。
     将指定规则集中的目标 IP CIDR 规则添加到路由，相当于添加到 `route_exclude_address`。
     匹配的流量将绕过 sing-box 路由。
 
-    请注意，由于 Android VpnService 无法处理大量路由（DeadSystemException），
-    因此它**在 Android 图形客户端上不起作用**，但除此之外，它在所有命令行客户端和 Apple 平台上都可以正常工作。
+    请注意，由于无法处理大量路由，它**在 Android 和 Apple 图形客户端上不起作用**，
+    但除此之外，它在所有命令行客户端以及 Linux 和 Windows 图形客户端上都可以正常工作。
 
 #### endpoint_independent_nat
 
-启用独立于端点的 NAT。
+此选项自 sing-box 1.11.0 起不再生效，可从配置中移除。
 
-性能可能会略有下降，所以不建议在不需要的时候开启。
-
-#### udp_timeout
-
-UDP NAT 过期时间。
-
-默认使用 `5m`。
+自 sing-box 1.14.0 起，可使用 [UDP NAT 字段](/zh/configuration/shared/udp-nat/)自定义映射和过滤行为。
 
 #### stack
 
@@ -503,6 +611,30 @@ TCP/IP 栈。
 
 排除路由的 Android 应用包名。
 
+#### include_mac_address
+
+!!! question "自 sing-box 1.14.0 起"
+
+!!! quote ""
+
+    仅支持 Linux，且需要 `auto_route` 和 `auto_redirect` 已启用。
+
+限制被路由的 MAC 地址。默认不限制。
+
+与 `exclude_mac_address` 冲突。
+
+#### exclude_mac_address
+
+!!! question "自 sing-box 1.14.0 起"
+
+!!! quote ""
+
+    仅支持 Linux，且需要 `auto_route` 和 `auto_redirect` 已启用。
+
+排除路由的 MAC 地址。
+
+与 `include_mac_address` 冲突。
+
 #### platform
 
 平台特定的设置，由客户端应用提供。
@@ -542,6 +674,10 @@ TCP/IP 栈。
     仅在 Apple 平台图形客户端中支持。
 
 代理的主机名列表。
+
+### UDP NAT 字段
+
+参阅 [UDP NAT 字段](/zh/configuration/shared/udp-nat/)。
 
 ### 监听字段
 

@@ -1,30 +1,37 @@
 package v2raygrpc
 
 import (
+	"context"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing/common/baderror"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+
+	"google.golang.org/grpc"
 )
 
 var _ net.Conn = (*GRPCConn)(nil)
 
 type GRPCConn struct {
 	GunService
-	cache []byte
+	cache     []byte
+	cancel    context.CancelCauseFunc
+	closeOnce sync.Once
 }
 
-func NewGRPCConn(service GunService) *GRPCConn {
-	//nolint:staticcheck
-	if client, isClient := service.(GunService_TunClient); isClient {
-		service = &clientConnWrapper{client}
-	}
-	return &GRPCConn{
+func NewGRPCConn(service GunService, cancel context.CancelCauseFunc) net.Conn {
+	conn := &GRPCConn{
 		GunService: service,
+		cancel:     cancel,
 	}
+	if client, isClient := service.(grpc.ClientStream); isClient {
+		return &GRPCClientConn{GRPCConn: conn, client: client}
+	}
+	return conn
 }
 
 func (c *GRPCConn) Read(b []byte) (n int, err error) {
@@ -54,6 +61,11 @@ func (c *GRPCConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *GRPCConn) Close() error {
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel(nil)
+		}
+	})
 	return nil
 }
 
@@ -85,12 +97,13 @@ func (c *GRPCConn) Upstream() any {
 	return c.GunService
 }
 
-var _ N.WriteCloser = (*clientConnWrapper)(nil)
+var _ N.WriteCloser = (*GRPCClientConn)(nil)
 
-type clientConnWrapper struct {
-	GunService_TunClient
+type GRPCClientConn struct {
+	*GRPCConn
+	client grpc.ClientStream
 }
 
-func (c *clientConnWrapper) CloseWrite() error {
-	return c.CloseSend()
+func (c *GRPCClientConn) CloseWrite() error {
+	return c.client.CloseSend()
 }

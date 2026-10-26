@@ -2,27 +2,35 @@ package hysteria2
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/internal/compat/singquic/hysteria"
+	"github.com/sagernet/sing-box/internal/compat/singquic/hysteria2"
+	"github.com/sagernet/sing-box/internal/compat/singquic/hysteria2/realm"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-quic/hysteria"
-	"github.com/sagernet/sing-quic/hysteria2"
+	qtls "github.com/sagernet/sing-quic"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
+	"github.com/sagernet/sing/service/filemanager"
 )
 
 func RegisterInbound(registry *inbound.Registry) {
@@ -31,19 +39,17 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	listener     *listener.Listener
-	tlsConfig    tls.ServerConfig
-	service      *hysteria2.Service[int]
-	userNameList []string
-	uidToUuid    map[int]string
-	uuidToUid    map[string]int
-	userconns    sync.Map
+	usersAccess sync.Mutex
+	usersState  dynamicuser.Registry
+	router      adapter.Router
+	logger      log.ContextLogger
+	listener    *listener.Listener
+	tlsConfig   tls.ServerConfig
+	service     *hysteria2.Service[dynamicuser.User]
+	users       []option.Hysteria2User
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2InboundOptions) (adapter.Inbound, error) {
-	options.UDPFragmentDefault = true
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
@@ -52,6 +58,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, err
 	}
 	var salamanderPassword string
+	var geckoPassword string
+	var geckoMinPacketSize, geckoMaxPacketSize int
 	if options.Obfs != nil {
 		if options.Obfs.Password == "" {
 			return nil, E.New("missing obfs password")
@@ -59,6 +67,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		switch options.Obfs.Type {
 		case hysteria2.ObfsTypeSalamander:
 			salamanderPassword = options.Obfs.Password
+		case hysteria2.ObfsTypeGecko:
+			geckoPassword = options.Obfs.Password
+			geckoMinPacketSize = options.Obfs.GeckoOptions.MinPacketSize
+			geckoMaxPacketSize = options.Obfs.GeckoOptions.MaxPacketSize
 		default:
 			return nil, E.New("unknown obfs type: ", options.Obfs.Type)
 		}
@@ -67,7 +79,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if options.Masquerade != nil && options.Masquerade.Type != "" {
 		switch options.Masquerade.Type {
 		case C.Hysterai2MasqueradeTypeFile:
-			masqueradeHandler = http.FileServer(http.Dir(options.Masquerade.FileOptions.Directory))
+			masqueradeDirectory := filemanager.BasePath(ctx, os.ExpandEnv(options.Masquerade.FileOptions.Directory))
+			_, err = filemanager.ReadDir(ctx, masqueradeDirectory)
+			if err != nil && !os.IsNotExist(err) {
+				return nil, E.Cause(err, "read masquerade directory")
+			}
+			masqueradeHandler = http.FileServer(http.Dir(masqueradeDirectory))
 		case C.Hysterai2MasqueradeTypeProxy:
 			masqueradeURL, err := url.Parse(options.Masquerade.ProxyOptions.URL)
 			if err != nil {
@@ -117,36 +134,90 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	service, err := hysteria2.NewService[int](hysteria2.ServiceOptions{
-		Context:               ctx,
-		Logger:                logger,
-		BrutalDebug:           options.BrutalDebug,
-		SendBPS:               uint64(options.UpMbps * hysteria.MbpsToBps),
-		ReceiveBPS:            uint64(options.DownMbps * hysteria.MbpsToBps),
-		SalamanderPassword:    salamanderPassword,
-		TLSConfig:             tlsConfig,
+	var realmOptions *realm.Options
+	if options.Realm != nil {
+		if options.Realm.IPVersion != 0 && options.ListenOptions.Listen != nil {
+			listenAddr := netip.Addr(*options.ListenOptions.Listen).Unmap()
+			if options.Realm.IPVersion == 6 && listenAddr.Is4() {
+				return nil, E.New("realm.ip_version 6 conflicts with listen address ", listenAddr)
+			}
+			if options.Realm.IPVersion == 4 && listenAddr.Is6() && !listenAddr.IsUnspecified() {
+				return nil, E.New("realm.ip_version 4 conflicts with listen address ", listenAddr)
+			}
+		}
+		var queryOptions adapter.DNSQueryOptions
+		if options.Realm.STUNServersIsDomain() {
+			queryOptions, err = dialer.NewDNSQueryOptions(ctx, options.Realm.STUNDomainResolver, true)
+			if err != nil {
+				return nil, E.Cause(err, "create realm STUN domain resolver")
+			}
+		}
+		var httpClientTransport adapter.HTTPTransport
+		httpClientTransport, err = service.FromContext[adapter.HTTPClientManager](ctx).ResolveTransport(ctx, logger, common.PtrValueOrDefault(options.Realm.HTTPClient))
+		if err != nil {
+			return nil, E.Cause(err, "create realm http client")
+		}
+		dnsRouter := service.FromContext[adapter.DNSRouter](ctx)
+		realmOptions = &realm.Options{
+			ServerURL:   options.Realm.ServerURL,
+			Token:       options.Realm.Token,
+			RealmID:     options.Realm.RealmID,
+			STUNServers: options.Realm.STUNServers,
+			HTTPClient:  &http.Client{Transport: httpClientTransport},
+			Resolver: func(ctx context.Context, host string, ipv4, ipv6 bool) ([]netip.Addr, error) {
+				dnsOptions := queryOptions
+				switch {
+				case ipv4 && !ipv6:
+					dnsOptions.Strategy = C.DomainStrategyIPv4Only
+				case !ipv4 && ipv6:
+					dnsOptions.Strategy = C.DomainStrategyIPv6Only
+				}
+				return dnsRouter.Lookup(ctx, host, dnsOptions)
+			},
+			Logger:    logger,
+			IPVersion: options.Realm.IPVersion,
+		}
+		if options.Realm.PortMapping != nil && options.Realm.PortMapping.Enabled {
+			realmOptions.PortMapping = &realm.PortMappingOptions{
+				Timeout:  time.Duration(options.Realm.PortMapping.Timeout),
+				Lifetime: time.Duration(options.Realm.PortMapping.Lifetime),
+			}
+		}
+	}
+	hysteriaService, err := hysteria2.NewService[dynamicuser.User](hysteria2.ServiceOptions{
+		Context:            ctx,
+		Logger:             logger,
+		BrutalDebug:        options.BrutalDebug,
+		SendBPS:            uint64(options.UpMbps * hysteria.MbpsToBps),
+		ReceiveBPS:         uint64(options.DownMbps * hysteria.MbpsToBps),
+		SalamanderPassword: salamanderPassword,
+		GeckoPassword:      geckoPassword,
+		GeckoMinPacketSize: geckoMinPacketSize,
+		GeckoMaxPacketSize: geckoMaxPacketSize,
+		TLSConfig:          tlsConfig,
+		QUICOptions: qtls.QUICOptions{
+			IdleTimeout:             options.IdleTimeout.Build(),
+			KeepAlivePeriod:         options.KeepAlivePeriod.Build(),
+			StreamReceiveWindow:     options.StreamReceiveWindow.Value(),
+			ConnectionReceiveWindow: options.ConnectionReceiveWindow.Value(),
+			MaxConcurrentStreams:    options.MaxConcurrentStreams,
+			InitialPacketSize:       options.InitialPacketSize,
+			DisablePathMTUDiscovery: options.DisablePathMTUDiscovery,
+		},
 		IgnoreClientBandwidth: options.IgnoreClientBandwidth,
 		UDPTimeout:            udpTimeout,
 		Handler:               inbound,
 		MasqueradeHandler:     masqueradeHandler,
+		BBRProfile:            options.BBRProfile,
+		RealmOptions:          realmOptions,
 	})
 	if err != nil {
 		return nil, err
 	}
-	userList := make([]int, 0, len(options.Users))
-	userNameList := make([]string, 0, len(options.Users))
-	userPasswordList := make([]string, 0, len(options.Users))
-	for index, user := range options.Users {
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
-		userPasswordList = append(userPasswordList, user.Password)
+	inbound.service = hysteriaService
+	if err = inbound.setUsers(options.Users); err != nil {
+		return nil, err
 	}
-	service.UpdateUsers(userList, userPasswordList)
-	inbound.service = service
-	inbound.userNameList = userNameList
-	inbound.uidToUuid = make(map[int]string, len(options.Users))
-	inbound.uuidToUid = make(map[string]int, len(options.Users))
-	inbound.userconns = sync.Map{}
 	return inbound, nil
 }
 
@@ -155,29 +226,29 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	metadata.OriginDestination = h.listener.UDPAddr()
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName, found := h.uidToUuid[userID]; found {
-		if userName != "" {
-			metadata.User = userName
-			h.userconns.LoadOrStore(conn, userName)
-			onClose = N.AppendClose(onClose, func(err error) {
-				h.userconns.Delete(conn)
-			})
-			h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
-		} else {
-			h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
-		}
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
+	if !loaded {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+		return
+	}
+	if userName := identity.Name; userName != "" {
+		metadata.User = userName
+		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
-		h.logger.WarnContext(ctx, "no valid user: ", userID, " for inbound packet connection to ", metadata.Destination)
-		conn.Close()
+		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
+	}
+	var admitted bool
+	ctx, onClose, admitted = h.usersState.Track(ctx, conn, identity, onClose)
+	if !admitted {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrPermission)
 		return
 	}
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
@@ -188,51 +259,59 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	var metadata adapter.InboundContext
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	metadata.OriginDestination = h.listener.UDPAddr()
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName, found := h.uidToUuid[userID]; found {
-		if userName != "" {
-			metadata.User = userName
-			h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
-		} else {
-			h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
-		}
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
+	if !loaded {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
+		return
+	}
+	if userName := identity.Name; userName != "" {
+		metadata.User = userName
+		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
-		h.logger.WarnContext(ctx, "no valid user: ", userID, " for inbound connection to ", metadata.Destination)
-		conn.Close()
+		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
+	}
+	var admitted bool
+	ctx, onClose, admitted = h.usersState.Track(ctx, conn, identity, onClose)
+	if !admitted {
+		N.CloseOnHandshakeFailure(conn, onClose, os.ErrPermission)
 		return
 	}
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(h.usersState.Close)
 	if h.tlsConfig != nil {
 		err := h.tlsConfig.Start()
 		if err != nil {
 			return err
 		}
+		scope.Add(h.tlsConfig.Close)
 	}
 	packetConn, err := h.listener.ListenUDP()
 	if err != nil {
 		return err
 	}
-	return h.service.Start(packetConn)
+	scope.Add(h.listener.Close)
+	err = h.service.Start(packetConn)
+	if err != nil {
+		return err
+	}
+	scope.Add(h.service.Close)
+	return nil
 }
 
-func (h *Inbound) Close() error {
-	return common.Close(
-		h.listener,
-		h.tlsConfig,
-		common.PtrOrNil(h.service),
-	)
+func (h *Inbound) InterfaceUpdated(ctx context.Context) {
+	h.service.Reset()
 }

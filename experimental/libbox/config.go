@@ -5,17 +5,18 @@ import (
 	"context"
 	"net/netip"
 	"os"
+	"reflect"
+	"slices"
 
-	"github.com/sagernet/sing-box"
+	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/process"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
-	"github.com/sagernet/sing-box/experimental/libbox/platform"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-box/schema"
+	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
@@ -25,18 +26,18 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 )
 
-func BaseContext(platformInterface PlatformInterface) context.Context {
+func baseContext(platformInterface PlatformInterface) context.Context {
 	dnsRegistry := include.DNSTransportRegistry()
 	if platformInterface != nil {
 		if localTransport := platformInterface.LocalDNSTransport(); localTransport != nil {
 			dns.RegisterTransport[option.LocalDNSServerOptions](dnsRegistry, C.DNSTypeLocal, func(ctx context.Context, logger log.ContextLogger, tag string, options option.LocalDNSServerOptions) (adapter.DNSTransport, error) {
-				return newPlatformTransport(localTransport, tag, options), nil
+				return newPlatformTransport(ctx, logger, localTransport, tag, options)
 			})
 		}
 	}
 	ctx := context.Background()
 	ctx = filemanager.WithDefault(ctx, sWorkingPath, sTempPath, sUserID, sGroupID)
-	return box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry())
+	return box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
 }
 
 func parseConfig(ctx context.Context, configContent string) (option.Options, error) {
@@ -48,14 +49,14 @@ func parseConfig(ctx context.Context, configContent string) (option.Options, err
 }
 
 func CheckConfig(configContent string) error {
-	ctx := BaseContext(nil)
+	ctx := baseContext(nil)
 	options, err := parseConfig(ctx, configContent)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ctx = service.ContextWith[platform.Interface](ctx, (*platformInterfaceStub)(nil))
+	ctx = service.ContextWith[adapter.PlatformInterface](ctx, (*platformInterfaceStub)(nil))
 	instance, err := box.New(box.Options{
 		Context: ctx,
 		Options: options,
@@ -80,8 +81,16 @@ func (s *platformInterfaceStub) AutoDetectInterfaceControl(fd int) error {
 	return nil
 }
 
-func (s *platformInterfaceStub) OpenTun(options *tun.Options, platformOptions option.TunPlatformOptions) (tun.Tun, error) {
+func (s *platformInterfaceStub) UsePlatformInterface() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) OpenInterface(options *tun.Options, platformOptions option.TunPlatformOptions) (tun.Tun, error) {
 	return nil, os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) ProcessPlatformOptions(options option.TunPlatformOptions) error {
+	return nil
 }
 
 func (s *platformInterfaceStub) UsePlatformDefaultInterfaceMonitor() bool {
@@ -92,7 +101,11 @@ func (s *platformInterfaceStub) CreateDefaultInterfaceMonitor(logger logger.Logg
 	return (*interfaceMonitorStub)(nil)
 }
 
-func (s *platformInterfaceStub) Interfaces() ([]adapter.NetworkInterface, error) {
+func (s *platformInterfaceStub) UsePlatformNetworkInterfaces() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) NetworkInterfaces() ([]adapter.NetworkInterface, error) {
 	return nil, os.ErrInvalid
 }
 
@@ -100,26 +113,102 @@ func (s *platformInterfaceStub) UnderNetworkExtension() bool {
 	return false
 }
 
-func (s *platformInterfaceStub) IncludeAllNetworks() bool {
+func (s *platformInterfaceStub) NetworkExtensionIncludeAllNetworks() bool {
 	return false
 }
 
 func (s *platformInterfaceStub) ClearDNSCache() {
 }
 
-func (s *platformInterfaceStub) ReadWIFIState() adapter.WIFIState {
-	return adapter.WIFIState{}
-}
-
-func (s *platformInterfaceStub) SystemCertificates() []string {
+func (s *platformInterfaceStub) RequestPermissionForWIFIState() error {
 	return nil
 }
 
-func (s *platformInterfaceStub) FindProcessInfo(ctx context.Context, network string, source netip.AddrPort, destination netip.AddrPort) (*process.Info, error) {
+func (s *platformInterfaceStub) UsePlatformWIFIMonitor() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) ReadWIFIState(ctx context.Context) adapter.WIFIState {
+	return adapter.WIFIState{}
+}
+
+func (s *platformInterfaceStub) UsePlatformConnectionOwnerFinder() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) FindConnectionOwner(request *adapter.FindConnectionOwnerRequest) (*adapter.ConnectionOwner, error) {
 	return nil, os.ErrInvalid
 }
 
-func (s *platformInterfaceStub) SendNotification(notification *platform.Notification) error {
+func (s *platformInterfaceStub) UsePlatformNotification() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) SendNotification(notification *adapter.Notification) error {
+	return nil
+}
+
+func (s *platformInterfaceStub) CancelNotification(identifier string, typeID int32) error {
+	return nil
+}
+
+func (s *platformInterfaceStub) MyInterfaceAddress() []netip.Addr {
+	return nil
+}
+
+func (s *platformInterfaceStub) UsePlatformNeighborResolver() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) StartNeighborMonitor(listener adapter.NeighborUpdateListener) error {
+	return os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) CloseNeighborMonitor(listener adapter.NeighborUpdateListener) error {
+	return nil
+}
+
+func (s *platformInterfaceStub) UsePlatformShell() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) CheckPlatformShell() error {
+	return nil
+}
+
+func (s *platformInterfaceStub) OpenShellSession(user *adapter.PlatformUser, command string, env []string, term string, rows int32, cols int32) (adapter.ShellSession, error) {
+	return nil, os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) LookupSFTPServer() (string, error) {
+	return "", os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) ReadSystemSSHHostKey() ([]byte, error) {
+	return nil, os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) TailscaleHostname() string {
+	return ""
+}
+
+func (s *platformInterfaceStub) UsePlatformBridge() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) CreateBridge(options adapter.BridgeOptions) (adapter.BridgeSession, error) {
+	return nil, os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) LookupUser(username string) (*adapter.PlatformUser, error) {
+	return nil, os.ErrInvalid
+}
+
+func (s *platformInterfaceStub) UsePlatformLocalDNSTransport() bool {
+	return false
+}
+
+func (s *platformInterfaceStub) LocalDNSTransport() dns.TransportConstructorFunc[option.LocalDNSServerOptions] {
 	return nil
 }
 
@@ -155,12 +244,20 @@ func (s *interfaceMonitorStub) UnregisterCallback(element *list.Element[tun.Defa
 func (s *interfaceMonitorStub) RegisterMyInterface(interfaceName string) {
 }
 
-func (s *interfaceMonitorStub) MyInterface() string {
-	return ""
+func (s *interfaceMonitorStub) MyInterfaces() []string {
+	return nil
+}
+
+func GenerateConfigSchema() (*StringBox, error) {
+	content, err := schema.Generate(baseContext(nil), reflect.TypeFor[option.Options]())
+	if err != nil {
+		return nil, err
+	}
+	return wrapString(string(content)), nil
 }
 
 func FormatConfig(configContent string) (*StringBox, error) {
-	options, err := parseConfig(BaseContext(nil), configContent)
+	options, err := parseConfig(baseContext(nil), configContent)
 	if err != nil {
 		return nil, err
 	}
@@ -172,4 +269,14 @@ func FormatConfig(configContent string) (*StringBox, error) {
 		return nil, err
 	}
 	return wrapString(buffer.String()), nil
+}
+
+func HasTunInbound(configContent string) (bool, error) {
+	options, err := parseConfig(baseContext(nil), configContent)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(options.Inbounds, func(inbound option.Inbound) bool {
+		return inbound.Type == C.TypeTun
+	}), nil
 }

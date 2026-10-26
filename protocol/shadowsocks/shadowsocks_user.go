@@ -1,35 +1,45 @@
 package shadowsocks
 
 import (
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 )
 
-func (h *MultiInbound) AddUsers(users []option.ShadowsocksUser) error {
-	h.users = append(h.users, users...)
-	err := h.service.UpdateUsersWithPasswords(common.MapIndexed(h.users, func(index int, user option.ShadowsocksUser) int {
-		return index
-	}), common.Map(h.users, func(user option.ShadowsocksUser) string {
-		return user.Password
-	}))
+func (h *MultiInbound) setUsers(users []option.ShadowsocksUser) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(users)
+}
+func (h *MultiInbound) setUsersLocked(users []option.ShadowsocksUser) error {
+	identities := make([]dynamicuser.User, 0, len(users))
+	var passwords []string
+	for _, user := range users {
+		identities = append(identities, dynamicuser.User{Name: user.Name, Secret: user.Password})
+		passwords = append(passwords, user.Password)
+	}
+	err := h.usersState.Update(identities, func() error { return h.service.UpdateUsersWithPasswords(identities, passwords) })
+	if err == nil {
+		h.users = append([]option.ShadowsocksUser(nil), users...)
+	}
 	return err
 }
+func (h *MultiInbound) AddUsers(users []option.ShadowsocksUser) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(append(append([]option.ShadowsocksUser(nil), h.users...), users...))
+}
 func (h *MultiInbound) DelUsers(names []string) error {
-	toDelete := make(map[string]struct{})
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	removed := make(map[string]bool, len(names))
 	for _, name := range names {
-		toDelete[name] = struct{}{}
+		removed[name] = true
 	}
-	remaining := make([]option.ShadowsocksUser, 0, len(h.users))
+	users := make([]option.ShadowsocksUser, 0, len(h.users))
 	for _, user := range h.users {
-		if _, found := toDelete[user.Name]; !found {
-			remaining = append(remaining, user)
+		if !removed[user.Name] {
+			users = append(users, user)
 		}
 	}
-	h.users = remaining
-	err := h.service.UpdateUsersWithPasswords(common.MapIndexed(h.users, func(index int, user option.ShadowsocksUser) int {
-		return index
-	}), common.Map(h.users, func(user option.ShadowsocksUser) string {
-		return user.Password
-	}))
-	return err
+	return h.setUsersLocked(users)
 }

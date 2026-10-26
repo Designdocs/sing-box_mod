@@ -5,7 +5,6 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -54,7 +53,7 @@ type RuleItem interface {
 }
 
 func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options option.DefaultRule) (*DefaultRule, error) {
-	action, err := NewRuleAction(ctx, logger, options.RuleAction)
+	action, err := NewRuleAction(logger, options.RuleAction)
 	if err != nil {
 		return nil, E.Cause(err, "action")
 	}
@@ -206,6 +205,14 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
 		rule.items = append(rule.items, item)
 		rule.allItems = append(rule.allItems, item)
 	}
+	if len(options.PackageNameRegex) > 0 {
+		item, err := NewPackageNameRegexItem(options.PackageNameRegex)
+		if err != nil {
+			return nil, E.Cause(err, "package_name_regex")
+		}
+		rule.items = append(rule.items, item)
+		rule.allItems = append(rule.allItems, item)
+	}
 	if len(options.User) > 0 {
 		item := NewUserItem(options.User)
 		rule.items = append(rule.items, item)
@@ -261,23 +268,32 @@ func NewDefaultRule(ctx context.Context, logger log.ContextLogger, options optio
 		rule.items = append(rule.items, item)
 		rule.allItems = append(rule.allItems, item)
 	}
+	if len(options.SourceMACAddress) > 0 {
+		item := NewSourceMACAddressItem(options.SourceMACAddress)
+		rule.items = append(rule.items, item)
+		rule.allItems = append(rule.allItems, item)
+	}
+	if len(options.SourceHostname) > 0 {
+		item := NewSourceHostnameItem(options.SourceHostname)
+		rule.items = append(rule.items, item)
+		rule.allItems = append(rule.allItems, item)
+	}
 	if len(options.PreferredBy) > 0 {
 		item := NewPreferredByItem(ctx, options.PreferredBy)
 		rule.items = append(rule.items, item)
 		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.RuleSet) > 0 {
+		//nolint:staticcheck
+		if options.Deprecated_RulesetIPCIDRMatchSource {
+			return nil, E.New("rule_set_ipcidr_match_source is deprecated in sing-box 1.10.0 and removed in sing-box 1.11.0")
+		}
 		var matchSource bool
 		if options.RuleSetIPCIDRMatchSource {
 			matchSource = true
-		} else
-		//nolint:staticcheck
-		if options.Deprecated_RulesetIPCIDRMatchSource {
-			matchSource = true
-			deprecated.Report(ctx, deprecated.OptionBadMatchSource)
 		}
 		item := NewRuleSetItem(router, options.RuleSet, matchSource, false)
-		rule.items = append(rule.items, item)
+		rule.ruleSetItem = item
 		rule.allItems = append(rule.allItems, item)
 	}
 	return rule, nil
@@ -290,7 +306,7 @@ type LogicalRule struct {
 }
 
 func NewLogicalRule(ctx context.Context, logger log.ContextLogger, options option.LogicalRule) (*LogicalRule, error) {
-	action, err := NewRuleAction(ctx, logger, options.RuleAction)
+	action, err := NewRuleAction(logger, options.RuleAction)
 	if err != nil {
 		return nil, E.Cause(err, "action")
 	}
@@ -310,6 +326,10 @@ func NewLogicalRule(ctx context.Context, logger log.ContextLogger, options optio
 		return nil, E.New("unknown logical mode: ", options.Mode)
 	}
 	for i, subOptions := range options.Rules {
+		err = validateNoNestedRuleActions(subOptions, true)
+		if err != nil {
+			return nil, E.Cause(err, "sub rule[", i, "]")
+		}
 		subRule, err := NewRule(ctx, logger, subOptions, false)
 		if err != nil {
 			return nil, E.Cause(err, "sub rule[", i, "]")

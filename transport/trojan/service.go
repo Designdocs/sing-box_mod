@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync/atomic"
 
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/buf"
@@ -21,8 +22,7 @@ type Handler interface {
 }
 
 type Service[K comparable] struct {
-	users           map[K][56]byte
-	keys            map[[56]byte]K
+	keys            atomic.Pointer[map[[56]byte]K]
 	handler         Handler
 	fallbackHandler N.TCPConnectionHandlerEx
 	logger          logger.ContextLogger
@@ -30,8 +30,6 @@ type Service[K comparable] struct {
 
 func NewService[K comparable](handler Handler, fallbackHandler N.TCPConnectionHandlerEx, logger logger.ContextLogger) *Service[K] {
 	return &Service[K]{
-		users:           make(map[K][56]byte),
-		keys:            make(map[[56]byte]K),
 		handler:         handler,
 		fallbackHandler: fallbackHandler,
 		logger:          logger,
@@ -48,14 +46,13 @@ func (s *Service[K]) UpdateUsers(userList []K, passwordList []string) error {
 			return ErrUserExists
 		}
 		key := Key(passwordList[i])
-		if oldUser, loaded := keys[key]; loaded {
-			return E.Extend(ErrUserExists, "password used by ", oldUser)
+		if _, loaded := keys[key]; loaded {
+			return E.Extend(ErrUserExists, "duplicate password")
 		}
 		users[user] = key
 		keys[key] = user
 	}
-	s.users = users
-	s.keys = keys
+	s.keys.Store(&keys)
 	return nil
 }
 
@@ -68,7 +65,13 @@ func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.
 		return s.fallback(ctx, conn, source, key[:n], E.New("bad request size"), onClose)
 	}
 
-	if user, loaded := s.keys[key]; loaded {
+	keys := s.keys.Load()
+	var user K
+	var loaded bool
+	if keys != nil {
+		user, loaded = (*keys)[key]
+	}
+	if loaded {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return s.fallback(ctx, conn, source, key[:], E.New("bad request"), onClose)

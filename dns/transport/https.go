@@ -5,11 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -33,7 +32,10 @@ import (
 
 const MimeType = "application/dns-message"
 
-var _ adapter.DNSTransport = (*HTTPSTransport)(nil)
+var (
+	_ adapter.DNSTransport         = (*HTTPSTransport)(nil)
+	_ adapter.IdleConnectionKeeper = (*HTTPSTransport)(nil)
+)
 
 func RegisterHTTPS(registry *dns.TransportRegistry) {
 	dns.RegisterTransport[option.RemoteHTTPSDNSServerOptions](registry, C.DNSTypeHTTPS, NewHTTPS)
@@ -45,6 +47,9 @@ type HTTPSTransport struct {
 	dialer           N.Dialer
 	destination      *url.URL
 	headers          http.Header
+	serverAddr       M.Socksaddr
+	fallback         *atomic.Bool
+	keepIdle         atomic.Bool
 	transportAccess  sync.Mutex
 	transport        *HTTPSTransportWrapper
 	transportResetAt time.Time
@@ -75,15 +80,14 @@ func NewHTTPS(ctx context.Context, logger log.ContextLogger, tag string, options
 			host = options.Server
 		}
 	}
-	destinationURL := url.URL{
-		Scheme: "https",
-		Host:   host,
-	}
-	if destinationURL.Host == "" {
-		destinationURL.Host = options.Server
-	}
+	destinationAddress := M.ParseSocksaddrHostPort(host, options.ServerPort)
+	destinationURL := url.URL{Scheme: "https"}
 	if options.ServerPort != 0 && options.ServerPort != 443 {
-		destinationURL.Host = net.JoinHostPort(destinationURL.Host, strconv.Itoa(int(options.ServerPort)))
+		destinationURL.Host = destinationAddress.String()
+	} else if destinationAddress.IsIPv6() {
+		destinationURL.Host = "[" + destinationAddress.AddrString() + "]"
+	} else {
+		destinationURL.Host = destinationAddress.AddrString()
 	}
 	path := options.Path
 	if path == "" {
@@ -120,34 +124,71 @@ func NewHTTPSRaw(
 	serverAddr M.Socksaddr,
 	tlsConfig tls.Config,
 ) *HTTPSTransport {
-	return &HTTPSTransport{
+	if tlsConfig != nil {
+		dialer = tls.NewDialer(dialer, tlsConfig)
+	}
+	fallback := new(atomic.Bool)
+	if destination.Scheme == "http" {
+		// plain HTTP DoH used by Tailscale
+		fallback.Store(true)
+	}
+	transport := &HTTPSTransport{
 		TransportAdapter: adapter,
 		logger:           logger,
 		dialer:           dialer,
 		destination:      destination,
 		headers:          headers,
-		transport:        NewHTTPSTransportWrapper(tls.NewDialer(dialer, tlsConfig), serverAddr),
+		serverAddr:       serverAddr,
+		fallback:         fallback,
+		transport:        NewHTTPSTransportWrapper(dialer, serverAddr, fallback),
 	}
+	transport.keepIdle.Store(true)
+	return transport
 }
 
-func (t *HTTPSTransport) Start(stage adapter.StartStage) error {
+func (t *HTTPSTransport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(func() error {
+		t.Reset()
+		return nil
+	})
 	return dialer.InitializeDetour(t.dialer)
 }
 
-func (t *HTTPSTransport) Close() error {
+func (t *HTTPSTransport) Reset() {
+	t.transportAccess.Lock()
+	defer t.transportAccess.Unlock()
+	t.resetTransportLocked()
+}
+
+func (t *HTTPSTransport) SetKeepIdleConnections(keep bool) {
+	t.keepIdle.Store(keep)
+	if !keep {
+		t.CloseIdleConnections()
+	}
+}
+
+func (t *HTTPSTransport) CloseIdleConnections() {
 	t.transportAccess.Lock()
 	defer t.transportAccess.Unlock()
 	t.transport.CloseIdleConnections()
-	t.transport = t.transport.Clone()
-	return nil
+}
+
+func (t *HTTPSTransport) resetTransportLocked() {
+	oldTransport := t.transport
+	t.transport = NewHTTPSTransportWrapper(t.dialer, t.serverAddr, t.fallback)
+	t.transportResetAt = time.Now()
+	oldTransport.Close()
 }
 
 func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	startAt := time.Now()
 	response, err := t.exchange(ctx, message)
+	if !t.keepIdle.Load() {
+		t.CloseIdleConnections()
+	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			t.transportAccess.Lock()
@@ -155,13 +196,17 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 			if t.transportResetAt.After(startAt) {
 				return nil, err
 			}
-			t.transport.CloseIdleConnections()
-			t.transport = t.transport.Clone()
-			t.transportResetAt = time.Now()
+			t.resetTransportLocked()
 		}
 		return nil, err
 	}
 	return response, nil
+}
+
+func (t *HTTPSTransport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
+	go func() {
+		callback(t.Exchange(ctx, message))
+	}()
 }
 
 func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
@@ -182,7 +227,10 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	request.Header = t.headers.Clone()
 	request.Header.Set("Content-Type", MimeType)
 	request.Header.Set("Accept", MimeType)
-	response, err := t.transport.RoundTrip(request)
+	t.transportAccess.Lock()
+	currentTransport := t.transport
+	t.transportAccess.Unlock()
+	response, err := currentTransport.RoundTrip(request)
 	requestBuffer.Release()
 	if err != nil {
 		return nil, err
@@ -194,12 +242,12 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	var responseMessage mDNS.Msg
 	if response.ContentLength > 0 {
 		responseBuffer := buf.NewSize(int(response.ContentLength))
+		defer responseBuffer.Release()
 		_, err = responseBuffer.ReadFullFrom(response.Body, int(response.ContentLength))
 		if err != nil {
 			return nil, err
 		}
 		err = responseMessage.Unpack(responseBuffer.Bytes())
-		responseBuffer.Release()
 	} else {
 		rawMessage, err = io.ReadAll(response.Body)
 		if err != nil {

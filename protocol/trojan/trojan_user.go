@@ -1,44 +1,45 @@
 package trojan
 
 import (
-	"net"
-
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 )
 
-func (h *Inbound) AddUsers(users []option.TrojanUser) error {
-	h.users = append(h.users, users...)
-	err := h.service.UpdateUsers(common.MapIndexed(h.users, func(index int, user option.TrojanUser) int {
-		return index
-	}), common.Map(h.users, func(user option.TrojanUser) string {
-		return user.Password
-	}))
+func (h *Inbound) setUsers(users []option.TrojanUser) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(users)
+}
+func (h *Inbound) setUsersLocked(users []option.TrojanUser) error {
+	identities := make([]dynamicuser.User, 0, len(users))
+	var passwords []string
+	for _, user := range users {
+		identities = append(identities, dynamicuser.User{Name: user.Name, Secret: user.Password})
+		passwords = append(passwords, user.Password)
+	}
+	err := h.usersState.Update(identities, func() error { return h.service.UpdateUsers(identities, passwords) })
+	if err == nil {
+		h.users = append([]option.TrojanUser(nil), users...)
+	}
 	return err
 }
+func (h *Inbound) AddUsers(users []option.TrojanUser) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(append(append([]option.TrojanUser(nil), h.users...), users...))
+}
 func (h *Inbound) DelUsers(names []string) error {
-	nameMap := make(map[string]struct{}, len(names))
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	removed := make(map[string]bool, len(names))
 	for _, name := range names {
-		h.userconns.Range(func(key, value interface{}) bool {
-			if value.(string) == name {
-				key.(net.Conn).Close()
-				h.userconns.Delete(key)
-			}
-			return true
-		})
-		nameMap[name] = struct{}{}
+		removed[name] = true
 	}
-	filteredUsers := make([]option.TrojanUser, 0, len(h.users))
+	users := make([]option.TrojanUser, 0, len(h.users))
 	for _, user := range h.users {
-		if _, found := nameMap[user.Name]; !found {
-			filteredUsers = append(filteredUsers, user)
+		if !removed[user.Name] {
+			users = append(users, user)
 		}
 	}
-	h.users = filteredUsers
-	err := h.service.UpdateUsers(common.MapIndexed(h.users, func(index int, user option.TrojanUser) int {
-		return index
-	}), common.Map(h.users, func(user option.TrojanUser) string {
-		return user.Password
-	}))
-	return err
+	return h.setUsersLocked(users)
 }

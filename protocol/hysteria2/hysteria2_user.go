@@ -1,58 +1,45 @@
 package hysteria2
 
 import (
-	"net"
-
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"github.com/sagernet/sing-box/option"
 )
 
-func (h *Inbound) AddUsers(users []option.Hysteria2User, ids []int) error {
-	for i, user := range users {
-		h.userNameList = append(h.userNameList, user.Password)
-		h.uuidToUid[user.Password] = ids[i]
-		h.uidToUuid[ids[i]] = user.Password
-	}
-
-	indexs := make([]int, len(h.userNameList))
-	for i, uuid := range h.userNameList {
-		indexs[i] = h.uuidToUid[uuid]
-	}
-
-	h.service.UpdateUsers(indexs, h.userNameList)
-	return nil
+func (h *Inbound) setUsers(users []option.Hysteria2User) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(users)
 }
-
+func (h *Inbound) setUsersLocked(users []option.Hysteria2User) error {
+	identities := make([]dynamicuser.User, 0, len(users))
+	var passwords []string
+	for _, user := range users {
+		identities = append(identities, dynamicuser.User{Name: user.Name, Secret: user.Password})
+		passwords = append(passwords, user.Password)
+	}
+	err := h.usersState.Update(identities, func() error { h.service.UpdateUsers(identities, passwords); return nil })
+	if err == nil {
+		h.users = append([]option.Hysteria2User(nil), users...)
+	}
+	return err
+}
+func (h *Inbound) AddUsers(users []option.Hysteria2User, _ []int) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(append(append([]option.Hysteria2User(nil), h.users...), users...))
+}
 func (h *Inbound) DelUsers(names []string) error {
-	if len(names) == 0 {
-		return nil
-	}
-
-	toDelete := make(map[string]struct{})
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	removed := make(map[string]bool, len(names))
 	for _, name := range names {
-		toDelete[name] = struct{}{}
-		delete(h.uidToUuid, h.uuidToUid[name])
-		delete(h.uuidToUid, name)
-		h.userconns.Range(func(key, value interface{}) bool {
-			if value.(string) == name {
-				key.(net.Conn).Close()
-				h.userconns.Delete(key)
-			}
-			return true
-		})
+		removed[name] = true
 	}
-
-	remaining := make([]string, 0, len(h.userNameList))
-	for _, user := range h.userNameList {
-		if _, found := toDelete[user]; !found {
-			remaining = append(remaining, user)
+	users := make([]option.Hysteria2User, 0, len(h.users))
+	for _, user := range h.users {
+		if !removed[user.Name] {
+			users = append(users, user)
 		}
 	}
-
-	h.userNameList = remaining
-	indexs := make([]int, len(h.userNameList))
-	for i, uuid := range h.userNameList {
-		indexs[i] = h.uuidToUid[uuid]
-	}
-	h.service.UpdateUsers(indexs, h.userNameList)
-	return nil
+	return h.setUsersLocked(users)
 }

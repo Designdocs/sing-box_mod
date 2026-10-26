@@ -2,30 +2,40 @@
 icon: material/new-box
 ---
 
+!!! quote "sing-box 1.14.0 中的更改"
+
+    :material-plus: [certificate_provider](#certificate_provider)  
+    :material-plus: [handshake_timeout](#handshake_timeout)  
+    :material-plus: [spoof](#spoof)  
+    :material-plus: [spoof_method](#spoof_method)  
+    :material-plus: [engine](#engine)  
+    :material-delete-clock: [acme](#acme-字段)
+
 !!! quote "sing-box 1.13.0 中的更改"
 
-    :material-plus: [kernel_tx](#kernel_tx)
-    :material-plus: [kernel_rx](#kernel_rx)
-    :material-plus: [curve_preferences](#curve_preferences)
-    :material-plus: [certificate_public_key_sha256](#certificate_public_key_sha256)
-    :material-plus: [client_certificate](#client_certificate)
-    :material-plus: [client_certificate_path](#client_certificate_path)
-    :material-plus: [client_key](#client_key)
-    :material-plus: [client_key_path](#client_key_path)
-    :material-plus: [client_authentication](#client_authentication)
-    :material-plus: [client_certificate_public_key_sha256](#client_certificate_public_key_sha256)
+    :material-plus: [kernel_tx](#kernel_tx)  
+    :material-plus: [kernel_rx](#kernel_rx)  
+    :material-plus: [curve_preferences](#curve_preferences)  
+    :material-plus: [certificate_public_key_sha256](#certificate_public_key_sha256)  
+    :material-plus: [client_certificate](#client_certificate)  
+    :material-plus: [client_certificate_path](#client_certificate_path)  
+    :material-plus: [client_key](#client_key)  
+    :material-plus: [client_key_path](#client_key_path)  
+    :material-plus: [client_authentication](#client_authentication)  
+    :material-plus: [client_certificate_public_key_sha256](#client_certificate_public_key_sha256)  
+    :material-plus: [ech.query_server_name](#query_server_name)
 
 !!! quote "sing-box 1.12.0 中的更改"
 
-    :material-plus: [fragment](#fragment)
-    :material-plus: [fragment_fallback_delay](#fragment_fallback_delay)
-    :material-plus: [record_fragment](#record_fragment)
-    :material-delete-clock: [ech.pq_signature_schemes_enabled](#pq_signature_schemes_enabled)
+    :material-plus: [fragment](#fragment)  
+    :material-plus: [fragment_fallback_delay](#fragment_fallback_delay)  
+    :material-plus: [record_fragment](#record_fragment)  
+    :material-delete-clock: [ech.pq_signature_schemes_enabled](#pq_signature_schemes_enabled)  
     :material-delete-clock: [ech.dynamic_record_sizing_disabled](#dynamic_record_sizing_disabled)
 
 !!! quote "sing-box 1.10.0 中的更改"
 
-    :material-alert-decagram: [utls](#utls)  
+    :material-alert-decagram: [utls](#utls)
 
 ### 入站
 
@@ -48,6 +58,11 @@ icon: material/new-box
   "key_path": "",
   "kernel_tx": false,
   "kernel_rx": false,
+  "handshake_timeout": "",
+  "certificate_provider": "",
+
+  // 废弃的
+
   "acme": {
     "domain": [],
     "data_directory": "",
@@ -96,6 +111,7 @@ icon: material/new-box
 ```json
 {
   "enabled": true,
+  "engine": "",
   "disable_sni": false,
   "server_name": "",
   "insecure": false,
@@ -114,10 +130,16 @@ icon: material/new-box
   "fragment": false,
   "fragment_fallback_delay": "",
   "record_fragment": false,
+  "spoof": "",
+  "spoof_method": "",
+  "kernel_tx": false,
+  "kernel_rx": false,
+  "handshake_timeout": "",
   "ech": {
     "enabled": false,
     "config": [],
     "config_path": "",
+    "query_server_name": "",
 
     // 废弃的
     "pq_signature_schemes_enabled": false,
@@ -172,6 +194,53 @@ TLS 版本值：
 
 启用 TLS
 
+#### engine
+
+!!! question "自 sing-box 1.14.0 起"
+
+==仅客户端==
+
+要使用的 TLS 引擎。
+
+可用值：
+
+* `go`（默认）
+* `apple`
+* `windows`
+
+支持的字段：
+
+* `server_name`
+* `insecure`
+* `alpn`
+* `min_version`
+* `max_version`
+* `certificate` / `certificate_path`
+* `certificate_public_key_sha256`
+* `handshake_timeout`
+
+不支持的字段：
+
+* `disable_sni`
+* `cipher_suites`
+* `curve_preferences`
+* `client_certificate` / `client_certificate_path` / `client_key` / `client_key_path`
+* `fragment` / `record_fragment`
+* `kernel_tx` / `kernel_rx`
+* `ech`
+* `utls`
+* `reality`
+
+!!! note ""
+
+    `windows` 通过 SSPI 使用 Schannel，仅在 Windows build 17763 及以上可用，包括 Windows 10 版本 1809、Windows Server 2019 及后续版本。
+
+!!! note ""
+
+    TLS 1.3 仅在 Windows 11 或 Windows Server 2022 及后续版本上协商。
+
+默认版本范围为 TLS 1.2 到 TLS 1.3，与 `go` 引擎一致。
+
 #### disable_sni
 
 ==仅客户端==
@@ -202,7 +271,7 @@ TLS 版本值：
 
 可接受的最低 TLS 版本。
 
-默认情况下，当前使用 TLS 1.2 作为客户端的最低要求。作为服务器时使用 TLS 1.0。
+默认使用 TLS 1.2。
 
 #### max_version
 
@@ -405,6 +474,26 @@ echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/
 
 启用内核 TLS 接收支持。
 
+#### handshake_timeout
+
+!!! question "自 sing-box 1.14.0 起"
+
+TLS 握手超时，采用 golang 的 Duration 格式。
+
+默认使用 `15s`。
+
+#### certificate_provider
+
+!!! question "自 sing-box 1.14.0 起"
+
+==仅服务器==
+
+字符串或对象。
+
+为字符串时，共享[证书提供者](/zh/configuration/shared/certificate-provider/)的标签。
+
+为对象时，内联的证书提供者。可用类型和字段参阅[证书提供者](/zh/configuration/shared/certificate-provider/)。
+
 ## 自定义 TLS 支持
 
 !!! info "QUIC 支持"
@@ -415,9 +504,16 @@ echo | openssl s_client -servername example.com -connect example.com:443 2>/dev/
 
 ==仅客户端==
 
-!!! failure ""
+!!! failure "不推荐"
 
-    没有证据表明 GFW 根据 TLS 客户端指纹检测并阻止服务器，并且，使用一个未经安全审查的不完美模拟可能带来安全隐患。
+    uTLS 已被研究人员多次发现其指纹可被识别的漏洞。
+
+    uTLS 是一个试图通过复制 ClientHello 结构来模仿浏览器 TLS 指纹的 Go 库。
+    然而，浏览器使用完全不同的 TLS 实现（Chrome 使用 BoringSSL，Firefox 使用 NSS），
+    其实现行为无法通过简单复制握手格式来复现，其行为细节必然存在差异，使得检测成为可能。
+    此外，此库缺乏积极维护，且代码质量较差，不建议用于反审查场景。
+
+    如需 TLS 指纹抵抗，请改用 [NaiveProxy](/zh/configuration/inbound/naive/)。
 
 uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻力。
 
@@ -456,7 +552,7 @@ ECH 密钥和配置可以通过 `sing-box generate ech-keypair` 生成。
 
 !!! failure "已在 sing-box 1.12.0 废弃"
 
-    ECH 支持已在 sing-box 1.12.0 迁移至使用标准库，但标准库不支持后量子对等证书签名方案，因此 `pq_signature_schemes_enabled` 已被弃用且不再工作。
+    `pq_signature_schemes_enabled` 已在 sing-box 1.12.0 废弃且已在 sing-box 1.13.0 中被移除。
 
 启用对后量子对等证书签名方案的支持。
 
@@ -464,7 +560,7 @@ ECH 密钥和配置可以通过 `sing-box generate ech-keypair` 生成。
 
 !!! failure "已在 sing-box 1.12.0 废弃"
 
-    `dynamic_record_sizing_disabled` 与 ECH 无关，是错误添加的，现已弃用且不再工作。
+    `dynamic_record_sizing_disabled` 已在 sing-box 1.12.0 废弃且已在 sing-box 1.13.0 中被移除。
 
 禁用 TLS 记录的自适应大小调整。
 
@@ -503,6 +599,16 @@ ECH 配置路径，PEM 格式。
 
 如果为空，将尝试从 DNS 加载。
 
+#### query_server_name
+
+!!! question "自 sing-box 1.13.0 起"
+
+==仅客户端==
+
+覆盖用于 ECH HTTPS 记录查询的域名。
+
+如果为空，使用 `server_name` 查询。
+
 #### fragment
 
 !!! question "自 sing-box 1.12.0 起"
@@ -540,7 +646,43 @@ ECH 配置路径，PEM 格式。
 
 将 TLS 握手分段为多个 TLS 记录以绕过防火墙。
 
+#### spoof
+
+!!! question "自 sing-box 1.14.0 起"
+
+==仅客户端==
+
+!!! quote ""
+
+    仅支持 Linux、macOS 和 Windows，需要提升的权限。
+
+在真实 ClientHello 之前注入一个伪造的、携带白名单 SNI 的 TLS ClientHello，
+以欺骗基于 SNI 过滤的中间盒放行连接。
+
+Linux 上需要 `CAP_NET_RAW` 和 `CAP_NET_ADMIN`，macOS 上需要 root，Windows 上需要 Administrator。
+不支持 Windows ARM64。
+
+#### spoof_method
+
+!!! question "自 sing-box 1.14.0 起"
+
+==仅客户端==
+
+控制伪造报文被真实服务器拒绝的方式。
+
+| 取值                     | 行为                                                              |
+|--------------------------|-------------------------------------------------------------------|
+| `wrong-sequence`（默认） | 伪造报文的 TCP 序列号位于服务器接收窗口之前。                     |
+| `wrong-checksum`         | 伪造报文的 TCP 校验和被故意设为无效。                             |
+| `wrong-ack`              | 伪造报文的 TCP 确认号位于服务器发送窗口之前。                     |
+| `wrong-md5`              | 伪造报文携带 TCP-MD5 签名选项。                                   |
+| `wrong-timestamp`        | 伪造报文携带回退的 TCP 时间戳。仅支持 Linux/Windows，不支持 macOS。 |
+
 ### ACME 字段
+
+!!! failure "已在 sing-box 1.14.0 废弃"
+
+    内联 ACME 选项已在 sing-box 1.14.0 废弃且将在 sing-box 1.16.0 中被移除，参阅 [迁移指南](/zh/migration/#迁移内联-acme-到证书提供者)。
 
 #### domain
 
@@ -608,7 +750,7 @@ MAC 密钥。
 
 ACME DNS01 验证字段。如果配置，将禁用其他验证方法。
 
-参阅 [DNS01 验证字段](/configuration/shared/dns01_challenge/)。
+参阅 [DNS01 验证字段](/zh/configuration/shared/dns01_challenge/)。
 
 ### Reality 字段
 

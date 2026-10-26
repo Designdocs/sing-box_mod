@@ -3,12 +3,14 @@ package ccm
 import (
 	"bytes"
 	"context"
+	stdTLS "crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/ntp"
 	aTLS "github.com/sagernet/sing/common/tls"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -77,23 +80,50 @@ func isHopByHopHeader(header string) bool {
 	}
 }
 
+const (
+	weeklyWindowSeconds = 604800
+	weeklyWindowMinutes = weeklyWindowSeconds / 60
+)
+
+func parseInt64Header(headers http.Header, headerName string) (int64, bool) {
+	headerValue := strings.TrimSpace(headers.Get(headerName))
+	if headerValue == "" {
+		return 0, false
+	}
+	parsedValue, parseError := strconv.ParseInt(headerValue, 10, 64)
+	if parseError != nil {
+		return 0, false
+	}
+	return parsedValue, true
+}
+
+func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
+	resetAtUnix, hasResetAt := parseInt64Header(headers, "anthropic-ratelimit-unified-7d-reset")
+	if !hasResetAt || resetAtUnix <= 0 {
+		return nil
+	}
+
+	return &WeeklyCycleHint{
+		WindowMinutes: weeklyWindowMinutes,
+		ResetAt:       time.Unix(resetAtUnix, 0).UTC(),
+	}
+}
+
 type Service struct {
 	boxService.Adapter
 	ctx            context.Context
 	logger         log.ContextLogger
 	credentialPath string
+	detour         string
 	credentials    *oauthCredentials
 	users          []option.CCMUser
 	httpClient     *http.Client
 	httpHeaders    http.Header
 	listener       *listener.Listener
 	tlsConfig      tls.ServerConfig
-	httpServer     *http.Server
 	userManager    *UserManager
 	accessMutex    sync.RWMutex
 	usageTracker   *AggregatedUsage
-	trackingGroup  sync.WaitGroup
-	shuttingDown   bool
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.CCMServiceOptions) (adapter.Service, error) {
@@ -111,6 +141,10 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			ForceAttemptHTTP2: true,
+			TLSClientConfig: &stdTLS.Config{
+				RootCAs: adapter.RootPoolFromContext(ctx),
+				Time:    ntp.TimeFuncFromContext(ctx),
+			},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return serviceDialer.DialContext(ctx, network, M.ParseSocksaddr(addr))
 			},
@@ -126,6 +160,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		usageTracker = &AggregatedUsage{
 			LastUpdated:  time.Now(),
 			Combinations: make([]CostCombination, 0),
+			ctx:          ctx,
 			filePath:     options.UsagesPath,
 			logger:       logger,
 		}
@@ -133,6 +168,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 
 	service := &Service{
 		Adapter:        boxService.NewAdapter(C.TypeCCM, tag),
+		detour:         options.Detour,
 		ctx:            ctx,
 		logger:         logger,
 		credentialPath: options.CredentialPath,
@@ -160,14 +196,14 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 	return service, nil
 }
 
-func (s *Service) Start(stage adapter.StartStage) error {
+func (s *Service) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
 
 	s.userManager.UpdateUsers(s.users)
 
-	credentials, err := platformReadCredentials(s.credentialPath)
+	credentials, err := platformReadCredentials(s.ctx, s.credentialPath)
 	if err != nil {
 		return E.Cause(err, "read credentials")
 	}
@@ -176,26 +212,38 @@ func (s *Service) Start(stage adapter.StartStage) error {
 	if s.usageTracker != nil {
 		err = s.usageTracker.Load()
 		if err != nil {
-			s.logger.Warn("load usage statistics: ", err)
+			s.logger.Error("load usage statistics: ", err, ", usage tracking and saving disabled")
+			s.usageTracker = nil
+		} else {
+			scope.Add(func() error {
+				s.usageTracker.cancelPendingSave()
+				saveErr := s.usageTracker.Save()
+				if saveErr != nil {
+					s.logger.Error("save usage statistics: ", saveErr)
+				}
+				return nil
+			})
 		}
 	}
 
 	router := chi.NewRouter()
 	router.Mount("/", s)
 
-	s.httpServer = &http.Server{Handler: router}
+	httpServer := &http.Server{Handler: router}
 
 	if s.tlsConfig != nil {
 		err = s.tlsConfig.Start()
 		if err != nil {
 			return E.Cause(err, "create TLS config")
 		}
+		scope.Add(s.tlsConfig.Close)
 	}
 
 	tcpListener, err := s.listener.ListenTCP()
 	if err != nil {
 		return err
 	}
+	scope.Add(s.listener.Close)
 
 	if s.tlsConfig != nil {
 		if !common.Contains(s.tlsConfig.NextProtos(), http2.NextProtoTLS) {
@@ -204,8 +252,9 @@ func (s *Service) Start(stage adapter.StartStage) error {
 		tcpListener = aTLS.NewListener(tcpListener, s.tlsConfig)
 	}
 
+	scope.Add(httpServer.Close)
 	go func() {
-		serveErr := s.httpServer.Serve(tcpListener)
+		serveErr := httpServer.Serve(tcpListener)
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			s.logger.Error("serve error: ", serveErr)
 		}
@@ -237,7 +286,7 @@ func (s *Service) getAccessToken() (string, error) {
 
 	s.credentials = newCredentials
 
-	err = platformWriteCredentials(newCredentials, s.credentialPath)
+	err = platformWriteCredentials(s.ctx, newCredentials, s.credentialPath)
 	if err != nil {
 		s.logger.Warn("persist refreshed token: ", err)
 	}
@@ -245,11 +294,11 @@ func (s *Service) getAccessToken() (string, error) {
 	return newCredentials.AccessToken, nil
 }
 
-func detectContextWindow(betaHeader string, inputTokens int64) int {
-	if inputTokens > premiumContextThreshold {
-		features := strings.Split(betaHeader, ",")
-		for _, feature := range features {
-			if strings.TrimSpace(feature) == "context-1m" {
+func detectContextWindow(betaHeader string, totalInputTokens int64) int {
+	if totalInputTokens > premiumContextThreshold {
+		features := strings.SplitSeq(betaHeader, ",")
+		for feature := range features {
+			if strings.HasPrefix(strings.TrimSpace(feature), "context-1m") {
 				return contextWindowPremium
 			}
 		}
@@ -326,6 +375,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	serviceOverridesAcceptEncoding := len(s.httpHeaders.Values("Accept-Encoding")) > 0
+	if s.usageTracker != nil && !serviceOverridesAcceptEncoding {
+		// Strip Accept-Encoding so Go Transport adds it automatically
+		// and transparently decompresses the response for correct usage counting.
+		proxyRequest.Header.Del("Accept-Encoding")
+	}
+
 	anthropicBetaHeader := proxyRequest.Header.Get("anthropic-beta")
 	if anthropicBetaHeader != "" {
 		proxyRequest.Header.Set("anthropic-beta", anthropicBetaOAuthValue+","+anthropicBetaHeader)
@@ -386,6 +442,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, response *http.Response, requestModel string, anthropicBetaHeader string, messagesCount int, username string) {
+	weeklyCycleHint := extractWeeklyCycleHint(response.Header)
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	isStreaming := err == nil && mediaType == "text/event-stream"
 
@@ -410,8 +467,9 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 
 		if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 			if responseModel != "" {
-				contextWindow := detectContextWindow(anthropicBetaHeader, usage.InputTokens)
-				s.usageTracker.AddUsage(
+				totalInputTokens := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+				contextWindow := detectContextWindow(anthropicBetaHeader, totalInputTokens)
+				s.usageTracker.AddUsageWithCycleHint(
 					responseModel,
 					contextWindow,
 					messagesCount,
@@ -419,7 +477,11 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 					usage.OutputTokens,
 					usage.CacheReadInputTokens,
 					usage.CacheCreationInputTokens,
+					usage.CacheCreation.Ephemeral5mInputTokens,
+					usage.CacheCreation.Ephemeral1hInputTokens,
 					username,
+					time.Now(),
+					weeklyCycleHint,
 				)
 			}
 		}
@@ -458,8 +520,8 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 					continue
 				}
 
-				if bytes.HasPrefix(line, []byte("data: ")) {
-					eventData := bytes.TrimPrefix(line, []byte("data: "))
+				if after, ok0 := bytes.CutPrefix(line, []byte("data: ")); ok0 {
+					eventData := after
 					if bytes.Equal(eventData, []byte("[DONE]")) {
 						continue
 					}
@@ -479,6 +541,8 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 							accumulatedUsage.InputTokens = messageStart.Message.Usage.InputTokens
 							accumulatedUsage.CacheReadInputTokens = messageStart.Message.Usage.CacheReadInputTokens
 							accumulatedUsage.CacheCreationInputTokens = messageStart.Message.Usage.CacheCreationInputTokens
+							accumulatedUsage.CacheCreation.Ephemeral5mInputTokens = messageStart.Message.Usage.CacheCreation.Ephemeral5mInputTokens
+							accumulatedUsage.CacheCreation.Ephemeral1hInputTokens = messageStart.Message.Usage.CacheCreation.Ephemeral1hInputTokens
 						}
 					case "message_delta":
 						messageDelta := event.AsMessageDelta()
@@ -504,8 +568,9 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 
 			if accumulatedUsage.InputTokens > 0 || accumulatedUsage.OutputTokens > 0 {
 				if responseModel != "" {
-					contextWindow := detectContextWindow(anthropicBetaHeader, accumulatedUsage.InputTokens)
-					s.usageTracker.AddUsage(
+					totalInputTokens := accumulatedUsage.InputTokens + accumulatedUsage.CacheCreationInputTokens + accumulatedUsage.CacheReadInputTokens
+					contextWindow := detectContextWindow(anthropicBetaHeader, totalInputTokens)
+					s.usageTracker.AddUsageWithCycleHint(
 						responseModel,
 						contextWindow,
 						messagesCount,
@@ -513,7 +578,11 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 						accumulatedUsage.OutputTokens,
 						accumulatedUsage.CacheReadInputTokens,
 						accumulatedUsage.CacheCreationInputTokens,
+						accumulatedUsage.CacheCreation.Ephemeral5mInputTokens,
+						accumulatedUsage.CacheCreation.Ephemeral1hInputTokens,
 						username,
+						time.Now(),
+						weeklyCycleHint,
 					)
 				}
 			}
@@ -522,20 +591,9 @@ func (s *Service) handleResponseWithTracking(writer http.ResponseWriter, respons
 	}
 }
 
-func (s *Service) Close() error {
-	err := common.Close(
-		common.PtrOrNil(s.httpServer),
-		common.PtrOrNil(s.listener),
-		s.tlsConfig,
-	)
-
-	if s.usageTracker != nil {
-		s.usageTracker.cancelPendingSave()
-		saveErr := s.usageTracker.Save()
-		if saveErr != nil {
-			s.logger.Error("save usage statistics: ", saveErr)
-		}
+func (s *Service) References() []string {
+	if s.detour == "" {
+		return nil
 	}
-
-	return err
+	return []string{s.detour}
 }

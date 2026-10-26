@@ -1,66 +1,52 @@
 package tuic
 
 import (
-	"net"
-
 	"github.com/gofrs/uuid/v5"
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"github.com/sagernet/sing-box/option"
-	E "github.com/sagernet/sing/common/exceptions"
 )
 
-func (h *Inbound) AddUsers(users []option.TUICUser, ids []int) error {
-	for i, user := range users {
-		h.userNameList = append(h.userNameList, user.Name)
-		h.uuidToUid[user.UUID] = ids[i]
-		h.uidToUuid[ids[i]] = user.UUID
-	}
-	var userUUIDList [][16]byte
-	indexs := make([]int, len(h.userNameList))
-	for i, UUID := range h.userNameList {
-		indexs[i] = h.uuidToUid[UUID]
-		userUUID, err := uuid.FromString(UUID)
+func (h *Inbound) setUsers(users []option.TUICUser) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(users)
+}
+func (h *Inbound) setUsersLocked(users []option.TUICUser) error {
+	identities := make([]dynamicuser.User, 0, len(users))
+	var uuids [][16]byte
+	var passwords []string
+	for _, user := range users {
+		identities = append(identities, dynamicuser.User{Name: user.Name, Secret: user.UUID + "\x00" + user.Password})
+		id, err := uuid.FromString(user.UUID)
 		if err != nil {
-			return E.Cause(err, "invalid uuid for user ", i)
+			return err
 		}
-		userUUIDList = append(userUUIDList, userUUID)
+		uuids = append(uuids, id)
+		passwords = append(passwords, user.Password)
 	}
-	h.server.UpdateUsers(indexs, userUUIDList, h.userNameList)
-	return nil
+	err := h.usersState.Update(identities, func() error { h.server.UpdateUsers(identities, uuids, passwords); return nil })
+	if err == nil {
+		h.users = append([]option.TUICUser(nil), users...)
+	}
+	return err
+}
+func (h *Inbound) AddUsers(users []option.TUICUser, _ []int) error {
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	return h.setUsersLocked(append(append([]option.TUICUser(nil), h.users...), users...))
 }
 func (h *Inbound) DelUsers(names []string) error {
-	if len(names) == 0 {
-		return nil
-	}
-	toDelete := make(map[string]struct{})
+	h.usersAccess.Lock()
+	defer h.usersAccess.Unlock()
+	removed := make(map[string]bool, len(names))
 	for _, name := range names {
-		toDelete[name] = struct{}{}
-		delete(h.uidToUuid, h.uuidToUid[name])
-		delete(h.uuidToUid, name)
-		h.userconns.Range(func(key, value interface{}) bool {
-			if value.(string) == name {
-				key.(net.Conn).Close()
-				h.userconns.Delete(key)
-			}
-			return true
-		})
+		removed[name] = true
 	}
-	remaining := make([]string, 0, len(h.userNameList))
-	for _, user := range h.userNameList {
-		if _, found := toDelete[user]; !found {
-			remaining = append(remaining, user)
+	users := make([]option.TUICUser, 0, len(h.users))
+	for _, user := range h.users {
+		if !removed[user.Name] {
+			users = append(users, user)
 		}
 	}
-	h.userNameList = remaining
-	var userUUIDList [][16]byte
-	indexs := make([]int, len(h.userNameList))
-	for i, UUID := range h.userNameList {
-		indexs[i] = h.uuidToUid[UUID]
-		userUUID, err := uuid.FromString(UUID)
-		if err != nil {
-			return E.Cause(err, "invalid uuid for user ", i)
-		}
-		userUUIDList = append(userUUIDList, userUUID)
-	}
-	h.server.UpdateUsers(indexs, userUUIDList, h.userNameList)
-	return nil
+	return h.setUsersLocked(users)
 }

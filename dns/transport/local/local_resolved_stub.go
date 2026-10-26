@@ -1,5 +1,6 @@
 //go:build !linux
 
+//nolint:unused
 package local
 
 import (
@@ -8,10 +9,6 @@ import (
 
 	"github.com/sagernet/sing/common/logger"
 )
-
-func isSystemdResolvedManaged() bool {
-	return false
-}
 
 func NewResolvedResolver(ctx context.Context, logger logger.ContextLogger) (ResolvedResolver, error) {
 	return nil, os.ErrInvalid

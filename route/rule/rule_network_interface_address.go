@@ -40,9 +40,17 @@ func NewNetworkInterfaceAddressItem(networkManager adapter.NetworkManager, inter
 
 func (r *NetworkInterfaceAddressItem) Match(metadata *adapter.InboundContext) bool {
 	interfaces := r.networkManager.NetworkInterfaces()
+	var myInterfaces []string
+	interfaceMonitor := r.networkManager.InterfaceMonitor()
+	if interfaceMonitor != nil {
+		myInterfaces = interfaceMonitor.MyInterfaces()
+	}
 match:
 	for ifType, addresses := range r.interfaceAddresses {
 		for _, networkInterface := range interfaces {
+			if common.Contains(myInterfaces, networkInterface.Name) {
+				continue
+			}
 			if networkInterface.Type != ifType {
 				continue
 			}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"github.com/sagernet/sing-box/common/listener"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -72,7 +73,7 @@ func newTestInbound(t *testing.T) (*Inbound, *directRouter) {
 	t.Helper()
 	router := &directRouter{users: make(chan string, 8), dests: make(chan string, 8)}
 	logger := log.NewNOPFactory().NewLogger("test")
-	return &Inbound{
+	in := &Inbound{
 		Adapter:       inbound.NewAdapter(C.TypeNaive, "test"),
 		ctx:           context.Background(),
 		router:        router,
@@ -80,7 +81,10 @@ func newTestInbound(t *testing.T) (*Inbound, *directRouter) {
 		listener:      listener.New(listener.Options{Context: context.Background(), Logger: logger, Listen: option.ListenOptions{}}),
 		authenticator: auth.NewAuthenticator(testUsers),
 		probeHosts:    probeHostIndex(testUsers),
-	}, router
+	}
+	_ = in.connections.Update([]dynamicuser.User{{Name: "user"}}, func() error { return nil })
+	t.Cleanup(func() { _ = in.connections.Close() })
+	return in, router
 }
 
 func basicAuth(user, password string) string {

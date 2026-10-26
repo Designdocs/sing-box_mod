@@ -5,6 +5,7 @@ import (
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -15,12 +16,13 @@ import (
 	"github.com/sagernet/sing-box/dns/transport/fakeip"
 	"github.com/sagernet/sing-box/dns/transport/hosts"
 	"github.com/sagernet/sing-box/dns/transport/local"
+	"github.com/sagernet/sing-box/dns/transport/mdns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
+	"github.com/sagernet/sing-box/protocol/bridge"
 	"github.com/sagernet/sing-box/protocol/direct"
-	protocolDNS "github.com/sagernet/sing-box/protocol/dns"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
@@ -28,6 +30,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
+	"github.com/sagernet/sing-box/protocol/snell"
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/ssh"
 	"github.com/sagernet/sing-box/protocol/tor"
@@ -35,13 +38,15 @@ import (
 	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
+	"github.com/sagernet/sing-box/service/api"
+	originca "github.com/sagernet/sing-box/service/origin_ca"
 	"github.com/sagernet/sing-box/service/resolved"
 	"github.com/sagernet/sing-box/service/ssmapi"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
 func Context(ctx context.Context) context.Context {
-	return box.Context(ctx, InboundRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry())
+	return box.Context(ctx, InboundRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry(), CertificateProviderRegistry())
 }
 
 func InboundRegistry() *inbound.Registry {
@@ -57,6 +62,7 @@ func InboundRegistry() *inbound.Registry {
 	mixed.RegisterInbound(registry)
 
 	shadowsocks.RegisterInbound(registry)
+	snell.RegisterInbound(registry)
 	vmess.RegisterInbound(registry)
 	trojan.RegisterInbound(registry)
 	naive.RegisterInbound(registry)
@@ -65,6 +71,7 @@ func InboundRegistry() *inbound.Registry {
 	anytls.RegisterInbound(registry)
 
 	registerQUICInbounds(registry)
+	registerCloudflaredInbound(registry)
 	registerStubForRemovedInbounds(registry)
 
 	return registry
@@ -74,9 +81,9 @@ func OutboundRegistry() *outbound.Registry {
 	registry := outbound.NewRegistry()
 
 	direct.RegisterOutbound(registry)
+	bridge.RegisterOutbound(registry)
 
 	block.RegisterOutbound(registry)
-	protocolDNS.RegisterOutbound(registry)
 
 	group.RegisterSelector(registry)
 	group.RegisterURLTest(registry)
@@ -84,8 +91,10 @@ func OutboundRegistry() *outbound.Registry {
 	socks.RegisterOutbound(registry)
 	http.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)
+	snell.RegisterOutbound(registry)
 	vmess.RegisterOutbound(registry)
 	trojan.RegisterOutbound(registry)
+	registerNaiveOutbound(registry)
 	tor.RegisterOutbound(registry)
 	ssh.RegisterOutbound(registry)
 	shadowtls.RegisterOutbound(registry)
@@ -93,7 +102,6 @@ func OutboundRegistry() *outbound.Registry {
 	anytls.RegisterOutbound(registry)
 
 	registerQUICOutbounds(registry)
-	registerWireGuardOutbound(registry)
 	registerStubForRemovedOutbounds(registry)
 
 	return registry
@@ -103,6 +111,8 @@ func EndpointRegistry() *endpoint.Registry {
 	registry := endpoint.NewRegistry()
 
 	registerWireGuardEndpoint(registry)
+	registerOpenConnectEndpoint(registry)
+	registerOpenVPNEndpoints(registry)
 	registerTailscaleEndpoint(registry)
 
 	return registry
@@ -117,12 +127,15 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 	transport.RegisterHTTPS(registry)
 	hosts.RegisterTransport(registry)
 	local.RegisterTransport(registry)
+	mdns.RegisterTransport(registry)
 	fakeip.RegisterTransport(registry)
 	resolved.RegisterTransport(registry)
 
 	registerQUICTransports(registry)
 	registerDHCPTransport(registry)
 	registerTailscaleTransport(registry)
+	registerOpenConnectDNSTransport(registry)
+	registerOpenVPNDNSTransport(registry)
 
 	return registry
 }
@@ -130,11 +143,26 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 func ServiceRegistry() *service.Registry {
 	registry := service.NewRegistry()
 
+	api.RegisterService(registry)
 	resolved.RegisterService(registry)
 	ssmapi.RegisterService(registry)
 
+	registerQUICServices(registry)
 	registerDERPService(registry)
 	registerCCMService(registry)
+	registerOCMService(registry)
+	registerOOMKillerService(registry)
+	registerUSBIPServices(registry)
+
+	return registry
+}
+
+func CertificateProviderRegistry() *certificate.Registry {
+	registry := certificate.NewRegistry()
+
+	registerACMECertificateProvider(registry)
+	registerTailscaleCertificateProvider(registry)
+	originca.RegisterCertificateProvider(registry)
 
 	return registry
 }
@@ -148,5 +176,8 @@ func registerStubForRemovedInbounds(registry *inbound.Registry) {
 func registerStubForRemovedOutbounds(registry *outbound.Registry) {
 	outbound.Register[option.ShadowsocksROutboundOptions](registry, C.TypeShadowsocksR, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksROutboundOptions) (adapter.Outbound, error) {
 		return nil, E.New("ShadowsocksR is deprecated and removed in sing-box 1.6.0")
+	})
+	outbound.Register[option.StubOptions](registry, C.TypeWireGuard, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.StubOptions) (adapter.Outbound, error) {
+		return nil, E.New("WireGuard outbound is deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use WireGuard endpoint instead")
 	})
 }

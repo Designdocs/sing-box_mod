@@ -4,7 +4,15 @@ icon: material/new-box
 
 !!! quote "Changes in sing-box 1.13.0"
 
+    :material-plus: [bypass](#bypass)  
     :material-alert: [reject](#reject)
+
+!!! quote "Changes in sing-box 1.14.0"
+
+    :material-plus: [resolve.disable_optimistic_cache](#disable_optimistic_cache)  
+    :material-plus: [resolve.timeout](#timeout)  
+    :material-plus: [tls_spoof](#tls_spoof)  
+    :material-plus: [tls_spoof_method](#tls_spoof_method)
 
 !!! quote "Changes in sing-box 1.12.0"
 
@@ -39,6 +47,40 @@ icon: material/new-box
 ==Required==
 
 Tag of target outbound.
+
+#### route-options Fields
+
+See `route-options` fields below.
+
+### bypass
+
+!!! question "Since sing-box 1.13.0"
+
+!!! quote ""
+
+    Only supported on Linux with `auto_redirect` enabled.
+
+```json
+{
+  "action": "bypass",
+  "outbound": "",
+
+  ... // route-options Fields
+}
+```
+
+`bypass` bypasses sing-box at the kernel level for auto redirect connections in pre-match.
+
+For non-auto-redirect connections and already established connections,
+if `outbound` is specified, the behavior is the same as `route`;
+otherwise, the rule will be skipped.
+
+#### outbound
+
+Tag of target outbound.
+
+If not specified, the rule only matches in [pre-match](/configuration/shared/pre-match/)
+from auto redirect, and will be skipped in other contexts.
 
 #### route-options Fields
 
@@ -109,7 +151,9 @@ Not available when `method` is set to drop.
   "udp_timeout": "",
   "tls_fragment": false,
   "tls_fragment_fallback_delay": "",
-  "tls_record_fragment": ""
+  "tls_record_fragment": "",
+  "tls_spoof": "",
+  "tls_spoof_method": ""
 }
 ```
 
@@ -208,6 +252,28 @@ The fallback value used when TLS segmentation cannot automatically determine the
 
 Fragment TLS handshake into multiple TLS records to bypass firewalls.
 
+#### tls_spoof
+
+!!! question "Since sing-box 1.14.0"
+
+!!! quote ""
+
+    Only supported on Linux, macOS, and Windows, and requires elevated privileges.
+
+Inject a forged TLS ClientHello carrying this SNI before the real one,
+to fool SNI-filtering middleboxes that permit specific hostnames.
+
+See outbound TLS [`spoof`](/configuration/shared/tls/#spoof) for details
+and required privileges.
+
+#### tls_spoof_method
+
+!!! question "Since sing-box 1.14.0"
+
+How the forged segment is rejected by the real server. See outbound TLS
+[`spoof_method`](/configuration/shared/tls/#spoof_method) for the full table
+of accepted values and platform notes.
+
 ### sniff
 
 ```json
@@ -244,7 +310,9 @@ Timeout for sniffing.
   "server": "",
   "strategy": "",
   "disable_cache": false,
+  "disable_optimistic_cache": false,
   "rewrite_ttl": null,
+  "timeout": "",
   "client_subnet": null
 }
 ```
@@ -267,11 +335,25 @@ DNS resolution strategy, available values are: `prefer_ipv4`, `prefer_ipv6`, `ip
 
 Disable cache and save cache in this query.
 
+#### disable_optimistic_cache
+
+!!! question "Since sing-box 1.14.0"
+
+Disable optimistic DNS caching in this query.
+
 #### rewrite_ttl
 
 !!! question "Since sing-box 1.12.0"
 
 Rewrite TTL in DNS responses.
+
+#### timeout
+
+!!! question "Since sing-box 1.14.0"
+
+Override the DNS query timeout for this lookup.
+
+Will override `dns.timeout`.
 
 #### client_subnet
 
@@ -281,4 +363,4 @@ Append a `edns0-subnet` OPT extra record with the specified IP prefix to every q
 
 If value is an IP address instead of prefix, `/32` or `/128` will be appended automatically.
 
-Will overrides `dns.client_subnet`.
+Will override `dns.client_subnet`.

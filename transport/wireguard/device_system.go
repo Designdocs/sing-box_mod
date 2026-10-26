@@ -93,6 +93,7 @@ func (w *systemDevice) Start() error {
 		MTU:            w.options.MTU,
 		GSO:            true,
 		InterfaceScope: true,
+		DNSMode:        tun.DNSModeDisabled,
 		Inet4RouteAddress: common.Filter(w.options.AllowedAddress, func(it netip.Prefix) bool {
 			return it.Addr().Is4()
 		}),
@@ -111,12 +112,13 @@ func (w *systemDevice) Start() error {
 	}
 	err = tunInterface.Start()
 	if err != nil {
+		tunInterface.Close()
 		return err
 	}
 	w.options.Logger.Info("started at ", w.options.Name)
 	w.device = tunInterface
 	batchTUN, isBatchTUN := tunInterface.(tun.LinuxTUN)
-	if isBatchTUN {
+	if isBatchTUN && batchTUN.BatchSize() > 1 {
 		w.batchDevice = batchTUN
 	}
 	w.events <- wgTun.EventUp
@@ -133,6 +135,7 @@ func (w *systemDevice) Read(bufs [][]byte, sizes []int, offset int) (count int, 
 	} else {
 		sizes[0], err = w.device.Read(bufs[0][offset-tun.PacketOffset:])
 		if err == nil {
+			sizes[0] -= tun.PacketOffset
 			count = 1
 		} else if errors.Is(err, tun.ErrTooManySegments) {
 			err = wgTun.ErrTooManySegments
@@ -147,7 +150,7 @@ func (w *systemDevice) Write(bufs [][]byte, offset int) (count int, err error) {
 	} else {
 		for _, packet := range bufs {
 			if tun.PacketOffset > 0 {
-				common.ClearArray(packet[offset-tun.PacketOffset : offset])
+				clear(packet[offset-tun.PacketOffset : offset])
 				tun.PacketFillHeader(packet[offset-tun.PacketOffset:], tun.PacketIPVersion(packet[offset:]))
 			}
 			_, err = w.device.Write(packet[offset-tun.PacketOffset:])
@@ -177,8 +180,14 @@ func (w *systemDevice) Events() <-chan wgTun.Event {
 }
 
 func (w *systemDevice) Close() error {
-	close(w.events)
-	return w.device.Close()
+	var err error
+	w.closeOnce.Do(func() {
+		close(w.events)
+		if w.device != nil {
+			err = w.device.Close()
+		}
+	})
+	return err
 }
 
 func (w *systemDevice) BatchSize() int {

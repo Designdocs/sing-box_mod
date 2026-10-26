@@ -10,7 +10,6 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 
@@ -41,6 +40,9 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
 		}
 		dialOptions = append(dialOptions, grpc.WithTransportCredentials(NewTLSTransportCredentials(tlsConfig)))
+		if tlsConfig.ServerName() != "" {
+			dialOptions = append(dialOptions, grpc.WithAuthority(tlsConfig.ServerName()))
+		}
 	} else {
 		dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
@@ -100,13 +102,20 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 	client := NewGunServiceClient(clientConn).(GunServiceCustomNameClient)
-	ctx, cancel := common.ContextWithCancelCause(ctx)
-	stream, err := client.TunCustomName(ctx, c.serviceName)
+	streamCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopPropagation := context.AfterFunc(ctx, func() {
+		cancel(context.Cause(ctx))
+	})
+	stream, err := client.TunCustomName(streamCtx, c.serviceName)
 	if err != nil {
+		stopPropagation()
 		cancel(err)
 		return nil, err
 	}
-	return NewGRPCConn(stream), nil
+	if !stopPropagation() {
+		return nil, context.Cause(ctx)
+	}
+	return NewGRPCConn(stream, cancel), nil
 }
 
 func (c *Client) Close() error {

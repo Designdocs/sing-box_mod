@@ -2,8 +2,10 @@ package shadowsocks
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/common/dynamicuser"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -21,7 +23,6 @@ import (
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
-	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -35,13 +36,15 @@ var (
 
 type MultiInbound struct {
 	inbound.Adapter
-	ctx      context.Context
-	router   adapter.ConnectionRouterEx
-	logger   logger.ContextLogger
-	listener *listener.Listener
-	service  shadowsocks.MultiService[int]
-	users    []option.ShadowsocksUser
-	tracker  adapter.SSMTracker
+	ctx         context.Context
+	router      adapter.ConnectionRouterEx
+	logger      logger.ContextLogger
+	listener    *listener.Listener
+	service     shadowsocks.MultiService[dynamicuser.User]
+	usersState  dynamicuser.Registry
+	usersAccess sync.RWMutex
+	users       []option.ShadowsocksUser
+	tracker     adapter.SSMTracker
 }
 
 func newMultiInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ShadowsocksInboundOptions) (*MultiInbound, error) {
@@ -62,20 +65,20 @@ func newMultiInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	var service shadowsocks.MultiService[int]
+	var service shadowsocks.MultiService[dynamicuser.User]
 	if common.Contains(shadowaead_2022.List, options.Method) {
-		service, err = shadowaead_2022.NewMultiServiceWithPassword[int](
+		service, err = shadowaead_2022.NewMultiServiceWithPassword[dynamicuser.User](
 			options.Method,
 			options.Password,
 			int64(udpTimeout.Seconds()),
-			adapter.NewUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound),
+			adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound),
 			ntp.TimeFuncFromContext(ctx),
 		)
 	} else if common.Contains(shadowaead.List, options.Method) {
-		service, err = shadowaead.NewMultiService[int](
+		service, err = shadowaead.NewMultiService[dynamicuser.User](
 			options.Method,
 			int64(udpTimeout.Seconds()),
-			adapter.NewUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound),
+			adapter.NewLegacyUpstreamHandler(adapter.InboundContext{}, inbound.newConnection, inbound.newPacketConnection, inbound),
 		)
 	} else {
 		return nil, E.New("unsupported method: " + options.Method)
@@ -83,18 +86,10 @@ func newMultiInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	if err != nil {
 		return nil, err
 	}
-	if len(options.Users) > 0 {
-		err = service.UpdateUsersWithPasswords(common.MapIndexed(options.Users, func(index int, user option.ShadowsocksUser) int {
-			return index
-		}), common.Map(options.Users, func(user option.ShadowsocksUser) string {
-			return user.Password
-		}))
-		if err != nil {
-			return nil, err
-		}
-	}
 	inbound.service = service
-	inbound.users = options.Users
+	if err = inbound.setUsers(options.Users); err != nil {
+		return nil, err
+	}
 	inbound.listener = listener.New(listener.Options{
 		Context:                  ctx,
 		Logger:                   logger,
@@ -107,38 +102,38 @@ func newMultiInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	return inbound, err
 }
 
-func (h *MultiInbound) Start(stage adapter.StartStage) error {
+func (h *MultiInbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
-	return h.listener.Start()
-}
-
-func (h *MultiInbound) Close() error {
-	return h.listener.Close()
+	scope.Add(h.usersState.Close)
+	err := h.listener.Start()
+	if err != nil {
+		return err
+	}
+	scope.Add(h.listener.Close)
+	return nil
 }
 
 func (h *MultiInbound) SetTracker(tracker adapter.SSMTracker) {
 	h.tracker = tracker
 }
 
-func (h *MultiInbound) UpdateUsers(users []string, uPSKs []string) error {
-	err := h.service.UpdateUsersWithPasswords(common.MapIndexed(users, func(index int, user string) int {
-		return index
-	}), uPSKs)
-	if err != nil {
-		return err
+func (h *MultiInbound) UpdateUsers(names []string, passwords []string) error {
+	if len(names) != len(passwords) {
+		return os.ErrInvalid
 	}
-	h.users = common.Map(users, func(user string) option.ShadowsocksUser {
-		return option.ShadowsocksUser{
-			Name: user,
-		}
-	})
-	return nil
+	users := make([]option.ShadowsocksUser, len(names))
+	for i, name := range names {
+		users[i] = option.ShadowsocksUser{Name: name, Password: passwords[i]}
+	}
+	return h.setUsers(users)
 }
 
 //nolint:staticcheck
-func (h *MultiInbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+func (h *MultiInbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	onClose = dynamicuser.Bind(ctx, conn, onClose)
+	defer onClose(nil)
 	err := h.service.NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil {
@@ -151,7 +146,7 @@ func (h *MultiInbound) NewConnectionEx(ctx context.Context, conn net.Conn, metad
 }
 
 //nolint:staticcheck
-func (h *MultiInbound) NewPacketEx(buffer *buf.Buffer, source M.Socksaddr) {
+func (h *MultiInbound) NewPacket(buffer *buf.Buffer, source M.Socksaddr) {
 	err := h.service.NewPacket(h.ctx, &stubPacketConn{h.listener.PacketWriter()}, buffer, M.Metadata{Source: source})
 	if err != nil {
 		h.logger.Error(E.Cause(err, "process packet from ", source))
@@ -159,52 +154,54 @@ func (h *MultiInbound) NewPacketEx(buffer *buf.Buffer, source M.Socksaddr) {
 }
 
 func (h *MultiInbound) newConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
 	if !loaded {
 		return os.ErrInvalid
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
-		metadata.User = user
-	}
+	user := identity.Name
+	metadata.User = user
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	if h.tracker != nil {
 		conn = h.tracker.TrackConnection(conn, metadata)
 	}
+	ctx, done, admitted := h.usersState.Track(ctx, conn, identity, nil)
+	if !admitted {
+		return os.ErrPermission
+	}
+	defer done(nil)
 	return h.router.RouteConnection(ctx, conn, metadata)
 }
 
 func (h *MultiInbound) newPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[dynamicuser.User](ctx)
 	if !loaded {
 		return os.ErrInvalid
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
-		metadata.User = user
-	}
+	user := identity.Name
+	metadata.User = user
 	ctx = log.ContextWithNewID(ctx)
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source)
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
+	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
 	if h.tracker != nil {
 		conn = h.tracker.TrackPacketConnection(conn, metadata)
 	}
+	ctx, done, admitted := h.usersState.Track(ctx, conn, identity, nil)
+	if !admitted {
+		return os.ErrPermission
+	}
+	defer done(nil)
 	return h.router.RoutePacketConnection(ctx, conn, metadata)
 }
 

@@ -1,7 +1,10 @@
 package option
 
 import (
+	"reflect"
+
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/schema"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -20,6 +23,7 @@ type InboundACMEOptions struct {
 	AlternativeTLSPort      uint16                      `json:"alternative_tls_port,omitempty"`
 	ExternalAccount         *ACMEExternalAccountOptions `json:"external_account,omitempty"`
 	DNS01Challenge          *ACMEDNS01ChallengeOptions  `json:"dns01_challenge,omitempty"`
+	Profile                 string                      `json:"profile,omitempty"`
 }
 
 type ACMEExternalAccountOptions struct {
@@ -28,9 +32,10 @@ type ACMEExternalAccountOptions struct {
 }
 
 type _ACMEDNS01ChallengeOptions struct {
-	Provider          string                     `json:"provider,omitempty"`
+	Provider          string                     `json:"provider,omitempty" enum:"alidns,cloudflare,acmedns"`
 	AliDNSOptions     ACMEDNS01AliDNSOptions     `json:"-"`
 	CloudflareOptions ACMEDNS01CloudflareOptions `json:"-"`
+	ACMEDNSOptions    ACMEDNS01ACMEDNSOptions    `json:"-"`
 }
 
 type ACMEDNS01ChallengeOptions _ACMEDNS01ChallengeOptions
@@ -42,12 +47,14 @@ func (o ACMEDNS01ChallengeOptions) MarshalJSON() ([]byte, error) {
 		v = o.AliDNSOptions
 	case C.DNSProviderCloudflare:
 		v = o.CloudflareOptions
+	case C.DNSProviderACMEDNS:
+		v = o.ACMEDNSOptions
 	case "":
 		return nil, E.New("missing provider type")
 	default:
 		return nil, E.New("unknown provider type: " + o.Provider)
 	}
-	return badjson.MarshallObjects((_ACMEDNS01ChallengeOptions)(o), v)
+	return badjson.MarshallObjects(_ACMEDNS01ChallengeOptions(o), v)
 }
 
 func (o *ACMEDNS01ChallengeOptions) UnmarshalJSON(bytes []byte) error {
@@ -61,6 +68,8 @@ func (o *ACMEDNS01ChallengeOptions) UnmarshalJSON(bytes []byte) error {
 		v = &o.AliDNSOptions
 	case C.DNSProviderCloudflare:
 		v = &o.CloudflareOptions
+	case C.DNSProviderACMEDNS:
+		v = &o.ACMEDNSOptions
 	default:
 		return E.New("unknown provider type: " + o.Provider)
 	}
@@ -71,12 +80,35 @@ func (o *ACMEDNS01ChallengeOptions) UnmarshalJSON(bytes []byte) error {
 	return nil
 }
 
+func acmeDNS01Variants() []schema.UnionVariant {
+	return []schema.UnionVariant{
+		{Value: C.DNSProviderAliDNS, StructType: reflect.TypeFor[ACMEDNS01AliDNSOptions]()},
+		{Value: C.DNSProviderCloudflare, StructType: reflect.TypeFor[ACMEDNS01CloudflareOptions]()},
+		{Value: C.DNSProviderACMEDNS, StructType: reflect.TypeFor[ACMEDNS01ACMEDNSOptions]()},
+	}
+}
+
+func (o ACMEDNS01ChallengeOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("ACMEDNS01Challenge", func() (*schema.Node, error) {
+		return schema.DiscriminatedUnion(builder, "provider", true, acmeDNS01Variants(), nil)
+	})
+}
+
 type ACMEDNS01AliDNSOptions struct {
 	AccessKeyID     string `json:"access_key_id,omitempty"`
 	AccessKeySecret string `json:"access_key_secret,omitempty"`
 	RegionID        string `json:"region_id,omitempty"`
+	SecurityToken   string `json:"security_token,omitempty"`
 }
 
 type ACMEDNS01CloudflareOptions struct {
-	APIToken string `json:"api_token,omitempty"`
+	APIToken  string `json:"api_token,omitempty"`
+	ZoneToken string `json:"zone_token,omitempty"`
+}
+
+type ACMEDNS01ACMEDNSOptions struct {
+	Username  string `json:"username,omitempty"`
+	Password  string `json:"password,omitempty"`
+	Subdomain string `json:"subdomain,omitempty"`
+	ServerURL string `json:"server_url,omitempty"`
 }
