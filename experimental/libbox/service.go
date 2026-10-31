@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net"
 	"net/netip"
 	"runtime"
@@ -368,7 +369,7 @@ func AvailablePort(startPort int32) (int32, error) {
 		if port > 65535 {
 			return 0, E.New("no available port found")
 		}
-		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+		listener, err := tcplistener.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 		if err != nil {
 			if errors.Is(err, syscall.EADDRINUSE) {
 				continue

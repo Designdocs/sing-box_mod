@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net"
 	"net/http"
 	"net/url"
@@ -174,7 +175,7 @@ func parseOpenConnectCallbackTarget(prefixes []string) (openConnectCallbackTarge
 }
 
 func runOpenConnectCallbackListener(ctx context.Context, prompter *authPrompter, target openConnectCallbackTarget, loginURL string) (string, error) {
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", target.port))
+	listener, err := tcplistener.Listen("tcp", net.JoinHostPort("127.0.0.1", target.port))
 	if err != nil {
 		return "", E.New("cannot listen on 127.0.0.1:", target.port, ": ", err.Error(), "; pass --callback-port")
 	}

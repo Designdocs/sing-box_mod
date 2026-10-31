@@ -2,7 +2,7 @@ package v2rayapi
 
 import (
 	"errors"
-	"net"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net/http"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -57,7 +57,7 @@ func (s *Server) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 			return nil
 		})
 	case adapter.StartStatePostStart:
-		listener, err := net.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(s.listen).Addr), s.listen)
+		listener, err := tcplistener.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(s.listen).Addr), s.listen)
 		if err != nil {
 			return err
 		}

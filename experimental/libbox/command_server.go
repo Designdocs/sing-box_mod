@@ -2,6 +2,7 @@ package libbox
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net"
 	"os"
 	"path/filepath"
@@ -157,7 +158,7 @@ func (s *CommandServer) Start() error {
 			}
 		}
 	} else {
-		listener, err = net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(sCommandServerListenPort))))
+		listener, err = tcplistener.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(sCommandServerListenPort))))
 		if err != nil {
 			return E.Cause(err, "listen command server")
 		}

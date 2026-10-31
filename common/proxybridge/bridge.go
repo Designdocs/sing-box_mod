@@ -8,6 +8,7 @@ import (
 	"net"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
@@ -47,11 +48,11 @@ func New(ctx context.Context, logger logger.ContextLogger, tag string, dialer N.
 }
 
 func (b *Bridge) Start() error {
-	tcpListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	listener, err := tcplistener.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
-	b.tcpListener = tcpListener
+	b.tcpListener = listener.(*net.TCPListener)
 	go b.acceptLoop()
 	return nil
 }

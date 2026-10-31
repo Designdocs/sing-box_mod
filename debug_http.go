@@ -1,7 +1,7 @@
 package box
 
 import (
-	"net"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net/http"
 	"net/http/pprof"
 	"runtime"
@@ -64,7 +64,7 @@ func startDebugHTTPServer(options option.DebugOptions) (*http.Server, error) {
 		Addr:    options.Listen,
 		Handler: r,
 	}
-	listener, err := net.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(options.Listen).Addr), options.Listen)
+	listener, err := tcplistener.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(options.Listen).Addr), options.Listen)
 	if err != nil {
 		return nil, E.Cause(err, "listen debug HTTP server")
 	}

@@ -1,7 +1,7 @@
 package libbox
 
 import (
-	"net"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
@@ -20,7 +20,7 @@ func NewPProfServer(port int) *PProfServer {
 }
 
 func (s *PProfServer) Start() error {
-	ln, err := net.Listen("tcp", s.server.Addr)
+	ln, err := tcplistener.Listen("tcp", s.server.Addr)
 	if err != nil {
 		return err
 	}

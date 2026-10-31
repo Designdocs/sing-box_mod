@@ -55,9 +55,8 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 			Interval: keepInterval,
 		}
 	}
-	if l.listenOptions.TCPMultiPath {
-		listenConfig.SetMultipathTCP(true)
-	}
+	// Explicit false must override Go's MPTCP default (CVE-2026-98432).
+	listenConfig.SetMultipathTCP(l.listenOptions.TCPMultiPath)
 	if l.tproxy {
 		listenConfig.Control = control.Append(listenConfig.Control, func(network, address string, conn syscall.RawConn) error {
 			return control.Raw(conn, func(fd uintptr) error {

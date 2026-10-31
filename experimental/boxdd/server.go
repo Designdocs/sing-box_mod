@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/sagernet/sing-box/common/tcplistener"
 	"net"
 	"os"
 	"path/filepath"
@@ -102,7 +103,7 @@ func newDaemon() (*Daemon, error) {
 func (d *Daemon) listen() (net.Listener, error) {
 	if listenAddress != "" {
 		d.logger.Warn("listening on TCP address ", listenAddress, ": development only, no access control")
-		return net.Listen("tcp", listenAddress)
+		return tcplistener.Listen("tcp", listenAddress)
 	}
 	return listenEndpoint()
 }
