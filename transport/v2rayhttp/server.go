@@ -81,15 +81,16 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.h2cHandler.ServeHTTP(writer, request)
 		return
 	}
+	wrongPath := !strings.HasPrefix(request.URL.Path, s.path)
+	if wrongPath && adapter.RejectProbe(request.Context(), writer, request) {
+		return
+	}
 	host := request.Host
 	if len(s.host) > 0 && !common.Contains(s.host, host) {
 		s.invalidRequest(writer, request, http.StatusBadRequest, E.New("bad host: ", host))
 		return
 	}
-	if !strings.HasPrefix(request.URL.Path, s.path) {
-		if adapter.RejectProbe(request.Context(), writer, request) {
-			return
-		}
+	if wrongPath {
 		s.invalidRequest(writer, request, http.StatusNotFound, E.New("bad path: ", request.URL.Path))
 		return
 	}

@@ -70,15 +70,16 @@ type httpFlusher interface {
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	wrongPath := request.URL.Path != s.path
+	if wrongPath && adapter.RejectProbe(request.Context(), writer, request) {
+		return
+	}
 	host := request.Host
 	if len(s.host) > 0 && host != s.host {
 		s.invalidRequest(writer, request, http.StatusBadRequest, E.New("bad host: ", host))
 		return
 	}
-	if request.URL.Path != s.path {
-		if adapter.RejectProbe(request.Context(), writer, request) {
-			return
-		}
+	if wrongPath {
 		s.invalidRequest(writer, request, http.StatusNotFound, E.New("bad path: ", request.URL.Path))
 		return
 	}
