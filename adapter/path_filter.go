@@ -16,6 +16,6 @@ func RejectProbe(ctx context.Context, w http.ResponseWriter, r *http.Request) bo
 	if filter == nil || !filter(r) {
 		return false
 	}
-	w.WriteHeader(http.StatusForbidden)
+	w.WriteHeader(http.StatusNotFound)
 	return true
 }
