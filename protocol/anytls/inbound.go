@@ -81,6 +81,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
+	service.rejectStream = adapter.RejectedStreamFilterFrom(ctx)
 	inbound.service = service
 	inbound.listener = listener.New(listener.Options{
 		Context:           ctx,

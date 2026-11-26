@@ -1,10 +1,14 @@
 package trojan
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"github.com/sagernet/sing-box/adapter"
+	"io"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/buf"
@@ -22,10 +26,11 @@ type Handler interface {
 }
 
 type Service[K comparable] struct {
-	keys            atomic.Pointer[map[[56]byte]K]
-	handler         Handler
-	fallbackHandler N.TCPConnectionHandlerEx
-	logger          logger.ContextLogger
+	RejectedStreamFilter adapter.RejectedStreamFilter
+	keys                 atomic.Pointer[map[[56]byte]K]
+	handler              Handler
+	fallbackHandler      N.TCPConnectionHandlerEx
+	logger               logger.ContextLogger
 }
 
 func NewService[K comparable](handler Handler, fallbackHandler N.TCPConnectionHandlerEx, logger logger.ContextLogger) *Service[K] {
@@ -118,6 +123,22 @@ func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.
 }
 
 func (s *Service[K]) fallback(ctx context.Context, conn net.Conn, source M.Socksaddr, header []byte, err error, onClose N.CloseHandlerFunc) error {
+	if s.RejectedStreamFilter != nil {
+		var extra bytes.Buffer
+		if s.RejectedStreamFilter(conn, header, io.TeeReader(conn, &extra)) {
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(nil)
+			}
+			return nil
+		}
+		if s.fallbackHandler != nil {
+			_ = conn.SetReadDeadline(time.Time{})
+			if extra.Len() > 0 {
+				conn = bufio.NewCachedConn(conn, buf.As(extra.Bytes()).ToOwned())
+			}
+		}
+	}
 	if s.fallbackHandler == nil {
 		return E.Extend(err, "fallback disabled")
 	}

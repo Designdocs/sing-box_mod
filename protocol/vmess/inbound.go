@@ -36,6 +36,7 @@ func RegisterInbound(registry *inbound.Registry) {
 var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
 
 type Inbound struct {
+	rejectStream adapter.RejectedStreamFilter
 	inbound.Adapter
 	usersAccess sync.Mutex
 	usersState  dynamicuser.Registry
@@ -51,11 +52,12 @@ type Inbound struct {
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VMessInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeVMess, tag),
-		ctx:     ctx,
-		router:  uot.NewRouter(router, logger),
-		logger:  logger,
-		users:   options.Users,
+		rejectStream: adapter.RejectedStreamFilterFrom(ctx),
+		Adapter:      inbound.NewAdapter(C.TypeVMess, tag),
+		ctx:          ctx,
+		router:       uot.NewRouter(router, logger),
+		logger:       logger,
+		users:        options.Users,
 	}
 	var err error
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
@@ -162,7 +164,20 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 		}
 		conn = tlsConn
 	}
+	var header *adapter.HandshakePrefixConn
+	if h.transport == nil && h.rejectStream != nil {
+		header = &adapter.HandshakePrefixConn{Conn: conn}
+		conn = header
+	}
 	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+	if err != nil && header != nil && len(header.Prefix) > 0 && h.rejectStream(header.Conn, header.Prefix, header.Conn) {
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+		return
+	}
+
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))

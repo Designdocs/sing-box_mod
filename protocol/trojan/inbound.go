@@ -94,6 +94,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		fallbackHandler = adapter.NewUpstreamContextHandler(inbound.fallbackConnection, nil)
 	}
 	service := trojan.NewService[dynamicuser.User](adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
+	service.RejectedStreamFilter = adapter.RejectedStreamFilterFrom(ctx)
 	inbound.service = service
 	err := inbound.setUsers(options.Users)
 	if err != nil {

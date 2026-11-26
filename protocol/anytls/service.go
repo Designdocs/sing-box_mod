@@ -15,6 +15,7 @@ import (
 
 	anytls "github.com/anytls/sing-anytls"
 	"github.com/anytls/sing-anytls/padding"
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/compat/anytls/session"
 	"github.com/sagernet/sing/common/atomic"
 	"github.com/sagernet/sing/common/auth"
@@ -27,6 +28,7 @@ import (
 )
 
 type service struct {
+	rejectStream    adapter.RejectedStreamFilter
 	users           atomic.TypedValue[map[[32]byte]string]
 	padding         atomic.TypedValue[*padding.PaddingFactory]
 	handler         N.TCPConnectionHandlerEx
@@ -71,11 +73,15 @@ func (s *service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 	if err != nil {
 		return err
 	}
+	raw := conn
 	conn = bufio.NewCachedConn(conn, b)
 
 	by, err := b.ReadBytes(32)
 	if err != nil {
 		b.Resize(0, n)
+		if s.fallbackHandler == nil && s.rejectStream != nil && s.rejectStream(raw, b.Bytes(), raw) {
+			return nil
+		}
 		return s.fallback(ctx, conn, source, err, onClose)
 	}
 	var passwordSha256 [32]byte
@@ -87,6 +93,9 @@ func (s *service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 		}
 	} else {
 		b.Resize(0, n)
+		if s.fallbackHandler == nil && s.rejectStream != nil && s.rejectStream(raw, b.Bytes(), raw) {
+			return nil
+		}
 		return s.fallback(ctx, conn, source, E.New("unknown user password"), onClose)
 	}
 	by, err = b.ReadBytes(2)

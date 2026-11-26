@@ -207,7 +207,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		IgnoreClientBandwidth: options.IgnoreClientBandwidth,
 		UDPTimeout:            udpTimeout,
 		Handler:               inbound,
-		MasqueradeHandler:     masqueradeHandler,
+		MasqueradeHandler:     adapter.WithFilteredHTTPFallback(ctx, masqueradeHandler),
 		BBRProfile:            options.BBRProfile,
 		RealmOptions:          realmOptions,
 	})

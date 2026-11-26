@@ -76,6 +76,12 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	wrapped, err := adapter.WrapInboundListener(l.ctx, tcpListener)
+	if err != nil {
+		tcpListener.Close()
+		return nil, err
+	}
+	tcpListener = wrapped
 	l.logger.Info("tcp server started at ", tcpListener.Addr())
 	l.tcpListener = tcpListener
 	return tcpListener, err
