@@ -169,6 +169,9 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if plainClient && request.Method != "CONNECT" && !isProxyRequest(request) {
+		if adapter.RejectProbe(n.ctx, writer, request) {
+			return
+		}
 		// An origin-form request (GET / and the like) is addressed to this
 		// host, not through it: a browser reachability probe or a scanner.
 		// It is answered like any web server would, with no challenge, so a

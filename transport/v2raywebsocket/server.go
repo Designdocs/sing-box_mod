@@ -74,6 +74,9 @@ func NewServer(ctx context.Context, logger logger.ContextLogger, options option.
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if s.maxEarlyData == 0 || s.earlyDataHeaderName != "" {
 		if request.URL.Path != s.path {
+			if adapter.RejectProbe(request.Context(), writer, request) {
+				return
+			}
 			s.invalidRequest(writer, request, http.StatusNotFound, E.New("bad path: ", request.URL.Path))
 			return
 		}
@@ -88,11 +91,17 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			earlyDataStr := request.URL.RequestURI()[len(s.path):]
 			earlyData, err = base64.RawURLEncoding.DecodeString(earlyDataStr)
 		} else {
+			if adapter.RejectProbe(request.Context(), writer, request) {
+				return
+			}
 			s.invalidRequest(writer, request, http.StatusNotFound, E.New("bad path: ", request.URL.Path))
 			return
 		}
 	} else {
 		if request.URL.Path != s.path {
+			if adapter.RejectProbe(request.Context(), writer, request) {
+				return
+			}
 			s.invalidRequest(writer, request, http.StatusNotFound, E.New("bad path: ", request.URL.Path))
 			return
 		}
